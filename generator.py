@@ -6,31 +6,34 @@ import random
 from copy import deepcopy
 
 def _is_safe(grid, r, c, val):
+    size = len(grid)
+    block_size = int(size ** 0.5)
+    
     # row
-    if any(grid[r][j] == val for j in range(9)):
+    if any(grid[r][j] == val for j in range(size)):
         return False
     # col
-    if any(grid[i][c] == val for i in range(9)):
+    if any(grid[i][c] == val for i in range(size)):
         return False
     # block
-    br, bc = 3 * (r // 3), 3 * (c // 3)
-    for i in range(br, br + 3):
-        for j in range(bc, bc + 3):
+    br, bc = block_size * (r // block_size), block_size * (c // block_size)
+    for i in range(br, min(br + block_size, size)):
+        for j in range(bc, min(bc + block_size, size)):
             if grid[i][j] == val:
                 return False
     return True
 
-def generate_full_grid():
+def generate_full_grid(size=9):
     """Generate a complete solved Sudoku grid using randomized backtracking."""
-    grid = [[0] * 9 for _ in range(9)]
+    grid = [[0] * size for _ in range(size)]
 
     def fill_cell(pos=0):
-        if pos >= 81:
+        if pos >= size * size:
             return True
-        r, c = divmod(pos, 9)
+        r, c = divmod(pos, size)
         if grid[r][c] != 0:
             return fill_cell(pos + 1)
-        nums = list(range(1, 10))
+        nums = list(range(1, size + 1))
         random.shuffle(nums)
         for n in nums:
             if _is_safe(grid, r, c, n):
@@ -49,14 +52,15 @@ def _count_solutions(grid, limit=2):
     Stops early if count reaches `limit`.
     """
     g = deepcopy(grid)
+    size = len(grid)
     count = 0
 
     def helper():
         nonlocal count, g
         # find empty
         found = False
-        for i in range(9):
-            for j in range(9):
+        for i in range(size):
+            for j in range(size):
                 if g[i][j] == 0:
                     r, c = i, j
                     found = True
@@ -66,7 +70,7 @@ def _count_solutions(grid, limit=2):
         if not found:
             count += 1
             return
-        for val in range(1, 10):
+        for val in range(1, size + 1):
             if _is_safe(g, r, c, val):
                 g[r][c] = val
                 helper()
@@ -85,8 +89,9 @@ def remove_numbers_ensuring_unique(full_grid, removals_target):
     the puzzle still has exactly 1 solution.
     """
     puzzle = deepcopy(full_grid)
+    size = len(full_grid)
     # list of all cell coordinates
-    cells = [(r, c) for r in range(9) for c in range(9)]
+    cells = [(r, c) for r in range(size) for c in range(size)]
     random.shuffle(cells)
 
     removals = 0
@@ -98,34 +103,50 @@ def remove_numbers_ensuring_unique(full_grid, removals_target):
             continue
         saved = puzzle[r][c]
         puzzle[r][c] = 0
-        sols = _count_solutions(puzzle, limit=2)
-        if sols != 1:
-            # revert if not unique
-            puzzle[r][c] = saved
-        else:
+        # Check if still has unique solution
+        if _count_solutions(puzzle) == 1:
             removals += 1
+        else:
+            puzzle[r][c] = saved  # put it back
+
     return puzzle
 
-def generate_random_puzzle(difficulty="medium"):
+def generate_random_puzzle(difficulty="medium", size=9):
     """
     Generate a random Sudoku puzzle.
 
-    difficulty: "easy", "medium", or "hard"
+    Args:
+        difficulty: "easy", "medium", or "hard"
+        size: size of the grid (4, 6, or 9)
     """
-    full = generate_full_grid()
-
-    if difficulty == "easy":
-        removals = random.randint(35, 42)  # more clues -> easier
-    elif difficulty == "hard":
-        removals = random.randint(50, 58)  # fewer clues -> harder
-    else:  # medium
-        removals = random.randint(43, 50)
-
-    puzzle = remove_numbers_ensuring_unique(full, removals_target=removals)
+    # Define difficulty levels (percentage of cells to remove)
+    difficulty_levels = {
+        "easy": 0.4,    # ~40% cells removed
+        "medium": 0.6,  # ~60% cells removed
+        "hard": 0.7,    # ~70% cells removed
+    }
+    
+    # Generate a complete grid
+    full_grid = generate_full_grid(size)
+    
+    # Calculate how many cells to remove
+    total_cells = size * size
+    cells_to_remove = int(total_cells * difficulty_levels.get(difficulty, 0.6))
+    
+    # For very small grids, ensure we don't remove too many cells
+    if size <= 4:
+        min_clues = 4  # Minimum number of clues for 4x4
+        cells_to_remove = min(cells_to_remove, total_cells - min_clues)
+    
+    # Remove numbers while ensuring unique solution
+    puzzle = remove_numbers_ensuring_unique(full_grid, cells_to_remove)
+    
     return puzzle
 
 if __name__ == "__main__":
-    # quick test
-    p = generate_random_puzzle("medium")
-    for row in p:
-        print(row)
+    # Test different grid sizes
+    for size in [4, 6, 9]:
+        print(f"\nTesting {size}x{size} grid:")
+        p = generate_random_puzzle("medium", size)
+        for row in p:
+            print(" ".join(str(x) if x != 0 else "." for x in row))

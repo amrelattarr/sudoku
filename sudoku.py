@@ -4,27 +4,32 @@ from copy import deepcopy
 
 class Sudoku:
     def __init__(self, grid):
-        self.grid = deepcopy(grid)  # 9x9 grid, 0 for empty
+        self.grid = deepcopy(grid)  # NxN grid, 0 for empty
+        self.size = len(grid)
+        self.block_size = int(self.size ** 0.5)
+        # Ensure block_size is valid (for 4x4, block_size should be 2)
+        if self.block_size * self.block_size != self.size and self.size == 4:
+            self.block_size = 2
         self.steps = []  # (r,c,val, action) action: 'place' or 'remove'
 
     def find_empty(self):
-        for r in range(9):
-            for c in range(9):
+        for r in range(self.size):
+            for c in range(self.size):
                 if self.grid[r][c] == 0:
                     return r, c
         return None
 
     def valid(self, r, c, val):
         # row
-        if any(self.grid[r][j] == val for j in range(9)):
+        if any(self.grid[r][j] == val for j in range(self.size)):
             return False
         # col
-        if any(self.grid[i][c] == val for i in range(9)):
+        if any(self.grid[i][c] == val for i in range(self.size)):
             return False
         # block
-        br, bc = 3*(r//3), 3*(c//3)
-        for i in range(br, br+3):
-            for j in range(bc, bc+3):
+        br, bc = self.block_size * (r // self.block_size), self.block_size * (c // self.block_size)
+        for i in range(br, min(br + self.block_size, self.size)):
+            for j in range(bc, min(bc + self.block_size, self.size)):
                 if self.grid[i][j] == val:
                     return False
         return True
@@ -34,7 +39,7 @@ class Sudoku:
         if not found:
             return True
         r, c = found
-        for val in range(1, 10):
+        for val in range(1, self.size + 1):
             if self.valid(r, c, val):
                 self.grid[r][c] = val
                 if record_steps:
@@ -61,18 +66,47 @@ class Sudoku:
         self.steps.clear()
 
 if __name__ == '__main__':
-    # simple demo
-    puzzle = [
-        [5,3,0,0,7,0,0,0,0],
-        [6,0,0,1,9,5,0,0,0],
-        [0,9,8,0,0,0,0,6,0],
-        [8,0,0,0,6,0,0,0,3],
-        [4,0,0,8,0,3,0,0,1],
-        [7,0,0,0,2,0,0,0,6],
-        [0,6,0,0,0,0,2,8,0],
-        [0,0,0,4,1,9,0,0,5],
-        [0,0,0,0,8,0,0,7,9],
-    ]
-    s = Sudoku(puzzle)
-    ok, grid, steps = s.solve_backtracking(), s.grid, s.steps
-    print('Solved:', ok)
+    # Test different grid sizes
+    def test_sudoku_solver():
+        # Test 9x9
+        puzzle_9x9 = [
+            [5,3,0,0,7,0,0,0,0],
+            [6,0,0,1,9,5,0,0,0],
+            [0,9,8,0,0,0,0,6,0],
+            [8,0,0,0,6,0,0,0,3],
+            [4,0,0,8,0,3,0,0,1],
+            [7,0,0,0,2,0,0,0,6],
+            [0,6,0,0,0,0,2,8,0],
+            [0,0,0,4,1,9,0,0,5],
+            [0,0,0,0,8,0,0,7,9],
+        ]
+        
+        # Test 6x6
+        puzzle_6x6 = [
+            [1,0,0,4,0,0],
+            [0,2,0,0,5,0],
+            [0,0,3,0,0,6],
+            [4,0,0,1,0,0],
+            [0,5,0,0,2,0],
+            [0,0,6,0,0,3],
+        ]
+        
+        # Test 4x4
+        puzzle_4x4 = [
+            [1,0,0,4],
+            [0,2,3,0],
+            [0,3,2,0],
+            [4,0,0,1],
+        ]
+        
+        for size, puzzle in [(9, puzzle_9x9), (6, puzzle_6x6), (4, puzzle_4x4)]:
+            print(f"\nTesting {size}x{size} puzzle...")
+            s = Sudoku(puzzle)
+            ok = s.solve_backtracking(record_steps=False)
+            print(f"  - Solved: {ok}")
+            if ok:
+                print("  - Solution:")
+                for row in s.grid:
+                    print("   ", " ".join(str(x) for x in row))
+    
+    test_sudoku_solver()
