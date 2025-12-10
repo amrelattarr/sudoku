@@ -15,8 +15,8 @@ class SudokuGUI:
         root.title('Sudoku Solver')
         
         # Configure window size and minimum size
-        root.geometry('900x600')
-        root.minsize(800, 500)
+        root.geometry('1000x750')
+        root.minsize(900, 650)
         
         # Configure grid weights to make the layout responsive
         root.columnconfigure(0, weight=1)
@@ -32,6 +32,8 @@ class SudokuGUI:
         self.entries = []
         self.puzzle = []
         self.grid_frame = None
+        self.is_solving = False  # Flag to track if animation is running
+        self.animation_speed = 50  # Delay in milliseconds between steps
         
         # Set application style
         self.set_style()
@@ -190,6 +192,22 @@ class SudokuGUI:
                               selectcolor='#e1e1e1', indicatoron=1, width=12)
             rb.pack(anchor='w', pady=2)
         
+        # Animation speed control
+        speed_frame = tk.LabelFrame(left_frame, text='Animation Speed', bg='#f0f0f0',
+                                   font=('Arial', 10, 'bold'), padx=5, pady=5)
+        speed_frame.pack(fill='x', pady=5)
+        
+        self.speed_var = tk.IntVar(value=50)
+        speed_scale = tk.Scale(speed_frame, from_=1, to=200, orient='horizontal',
+                              variable=self.speed_var, bg='#f0f0f0', 
+                              font=('Arial', 9), length=120, showvalue=False,
+                              command=self.update_speed)
+        speed_scale.pack(fill='x', pady=2)
+        
+        self.speed_label = tk.Label(speed_frame, text='Medium', bg='#f0f0f0',
+                                   font=('Arial', 9), fg='#555555')
+        self.speed_label.pack(anchor='w')
+        
         # Action buttons
         btn_frame = tk.Frame(left_frame, bg='#f0f0f0', pady=10)
         btn_frame.pack(fill='x', pady=(10, 0))
@@ -234,12 +252,45 @@ class SudokuGUI:
         self.solve_btn.bind('<Enter>', lambda e: self.solve_btn.config(bg='#40b868'))
         self.solve_btn.bind('<Leave>', lambda e: self.solve_btn.config(bg='#50c878'))
         
+        # Stop button
+        self.stop_btn = tk.Button(
+            btn_frame, 
+            text='■ Stop', 
+            command=self.stop_animation,
+            bg='#e74c3c', 
+            fg='white',
+            state='disabled',
+            **btn_style
+        )
+        self.stop_btn.pack(pady=5, fill='x')
+        self.stop_btn.bind('<Enter>', lambda e: self.stop_btn.config(bg='#c0392b') if self.is_solving else None)
+        self.stop_btn.bind('<Leave>', lambda e: self.stop_btn.config(bg='#e74c3c') if self.is_solving else None)
+        
         # Status label
         self.status_label = tk.Label(left_frame, text='Ready', bg='#f0f0f0',
                                    font=('Arial', 10), fg='#555555', pady=5,
                                    wraplength=180, justify='left', anchor='w')
         self.status_label.pack(fill='x', pady=(15, 0))
 
+    # ----------------------------------------------------------
+    #  ANIMATION SPEED
+    # ----------------------------------------------------------
+    def update_speed(self, val):
+        """Update animation speed and label."""
+        speed = int(val)
+        self.animation_speed = speed
+        if speed < 30:
+            label = 'Very Fast'
+        elif speed < 70:
+            label = 'Fast'
+        elif speed < 110:
+            label = 'Medium'
+        elif speed < 150:
+            label = 'Slow'
+        else:
+            label = 'Very Slow'
+        self.speed_label.config(text=label)
+    
     # ----------------------------------------------------------
     #  BASIC GRID OPS
     # ----------------------------------------------------------
@@ -324,6 +375,74 @@ class SudokuGUI:
             self.status_label.config(text=f'Loaded default {size}x{size} puzzle.')
 
     # ----------------------------------------------------------
+    #  ANIMATION
+    # ----------------------------------------------------------
+    def animate_steps(self, steps, solved_grid):
+        """Animate the backtracking steps."""
+        self.is_solving = True
+        self.solve_btn.config(state='disabled')
+        self.restart_btn.config(state='disabled')
+        self.stop_btn.config(state='normal')
+        
+        def animate_step(index):
+            if not self.is_solving or index >= len(steps):
+                # Animation complete - show final solution
+                self.finalize_solution(solved_grid)
+                return
+            
+            r, c, val, action = steps[index]
+            entry = self.entries[r][c]
+            
+            if action == 'place':
+                # Show number being tried (orange color)
+                entry.delete(0, 'end')
+                entry.insert(0, str(val))
+                entry.config(fg='#FF8C00')  # Dark orange for trying
+                self.root.update()
+            elif action == 'remove':
+                # Show backtracking (red color, then remove)
+                entry.config(fg='red')
+                self.root.update()
+                # Schedule removal after brief pause
+                self.root.after(max(10, self.animation_speed // 3), 
+                              lambda: entry.delete(0, 'end'))
+            
+            # Schedule next step
+            self.root.after(self.animation_speed, lambda: animate_step(index + 1))
+        
+        # Start animation
+        animate_step(0)
+    
+    def stop_animation(self):
+        """Stop the current animation."""
+        self.is_solving = False
+        self.solve_btn.config(state='normal')
+        self.restart_btn.config(state='normal')
+        self.stop_btn.config(state='disabled')
+        self.status_label.config(text='Animation stopped.')
+    
+    def finalize_solution(self, solved_grid):
+        """Show the final solved puzzle with appropriate colors."""
+        self.is_solving = False
+        self.solve_btn.config(state='normal')
+        self.restart_btn.config(state='normal')
+        self.stop_btn.config(state='disabled')
+        
+        for r in range(self.grid_size):
+            for c in range(self.grid_size):
+                entry = self.entries[r][c]
+                val = solved_grid[r][c]
+                entry.delete(0, 'end')
+                if val != 0:
+                    entry.insert(0, str(val))
+                    # Color original clues in blue, solved cells in green
+                    if (r, c) in self.original_empties:
+                        entry.config(fg='green')
+                    else:
+                        entry.config(fg='blue')
+        self.status_label.config(text=f'Solved! Animation complete.')
+    
+    # ----------------------------------------------------------
     #  VALIDATION
     # ----------------------------------------------------------
     def _validate_initial_grid(self, grid):
@@ -403,16 +522,14 @@ class SudokuGUI:
             # Backtracking
             if algo == 'backtracking':
                 s = Sudoku(grid)
-                ok, solved_grid, steps = s.solve(algorithm='backtracking', record_steps=False)
+                # Enable step recording for visualization
+                ok, solved_grid, steps = s.solve(algorithm='backtracking', record_steps=True)
                 elapsed = time.time() - start
 
                 if ok:
-                    # First load the solved puzzle with default colors
-                    self.load_puzzle(solved_grid)
-                    # Then update colors for solved cells
-                    for r, c in self.original_empties:
-                        self.entries[r][c].config(fg='green')
-                    self.status_label.config(text=f'Backtracking solved in {elapsed:.3f}s.')
+                    self.status_label.config(text=f'Animating solution... ({len(steps)} steps)')
+                    # Start animation
+                    self.animate_steps(steps, solved_grid)
                 else:
                     self.status_label.config(text='Backtracking could not solve this puzzle.')
 
