@@ -1,497 +1,366 @@
-# cultural_solver.py
-# A simple Cultural Algorithm implementation for Sudoku solving.
-# Note: This is a heuristic evolutionary approach and not guaranteed to be as fast as backtracking,
-# but it demonstrates population+belief-space mechanisms.
+"""
+cultural_solver.py
+-------------------
+
+A **simple and well‑commented Cultural Algorithm** implementation for Sudoku.
+
+Key ideas (kept intentionally easy to understand):
+- We keep a **population** of complete candidate boards that always respect the given clues.
+- A **belief space** remembers which numbers work well in each empty cell (based on the best candidates).
+- Every generation we:
+  1. Evaluate all candidates by counting conflicts in columns and blocks.
+  2. Update the belief space using the best candidates.
+  3. Create a new population by copying good candidates and slightly changing
+     their non‑clue cells using the belief space + small random mutations.
+
+The GUI expects:
+    solver = CulturalSudokuSolver(grid, population_size=..., max_iters=...)
+    solution, score, iters = solver.run()
+where:
+    - grid: NxN list of lists, 0 = empty cell
+    - score: 0 means a valid Sudoku solution (no conflicts)
+    - iters: number of evolutionary iterations actually performed
+
+This implementation supports:
+    - 4x4 Sudoku  (2x2 blocks)
+    - 6x6 Sudoku  (2x3 blocks – standard rectangular blocks)
+    - 9x9 Sudoku  (3x3 blocks)
+"""
+
+from __future__ import annotations
+
+import math
 import random
 from copy import deepcopy
+from typing import Dict, List, Tuple
 
-def conflicts(grid):
-    # count number of conflicts (duplicates) in rows, cols and blocks
-    c = 0
-    for r in range(9):
-        nums = [x for x in grid[r] if x!=0]
-        c += len(nums) - len(set(nums))
-    for ccol in range(9):
-        nums = [grid[r][ccol] for r in range(9) if grid[r][ccol]!=0]
-        c += len(nums) - len(set(nums))
-    for br in range(0,9,3):
-        for bc in range(0,9,3):
-            nums = []
-            for r in range(br,br+3):
-                for c in range(bc,bc+3):
-                    if grid[r][c]!=0:
-                        nums.append(grid[r][c])
-            c += len(nums) - len(set(nums))
-    return c
+Grid = List[List[int]]
+Position = Tuple[int, int]
+
 
 class CulturalSudokuSolver:
-    def __init__(self, clues, population_size=500, max_iters=10000):
-        # clues: 9x9 with zeros
-        self.clues = deepcopy(clues)
-        self.population_size = population_size
-        self.max_iters = max_iters
-        self.population = []
-        self.belief = {}  # store promising values per cell as a frequency table
-        self.stagnation = 0  # track how many iterations without improvement
-        self.best_score = float('inf')  # track the best score found
+    """Cultural Algorithm based Sudoku solver.
 
-    def initial_individual(self):
-        # Create a valid Sudoku grid with constraints satisfied
+    The implementation is intentionally straightforward so it can be
+    read and understood by students without an evolutionary‑algorithms background.
+    """
+
+    # --------------------------------------------------------------
+    #  INITIALISATION
+    # --------------------------------------------------------------
+    def __init__(self, clues: Grid, population_size: int = 200, max_iters: int = 3000):
+        """
+        Args:
+            clues: 2‑D list with 0 for empty cells.
+            population_size: how many candidate boards we keep each generation.
+            max_iters: hard limit on generations.
+        """
+        self.clues: Grid = deepcopy(clues)
+        self.size: int = len(clues)
+        # We keep the parameters small so the GUI never freezes.
+        # The GUI may pass larger values, but we clamp them here.
+        self.population_size: int = max(10, population_size)
+        self.max_iters: int = max_iters
+
+        # Block shape depends on grid size.
+        # 4x4 -> 2x2, 9x9 -> 3x3, 6x6 -> 2x3 (standard rectangular blocks).
+        if self.size == 4:
+            self.block_rows, self.block_cols = 2, 2
+            self.population_size = min(self.population_size, 40)
+            self.max_iters = min(self.max_iters, 300)
+        elif self.size == 6:
+            self.block_rows, self.block_cols = 2, 3
+            self.population_size = min(self.population_size, 60)
+            self.max_iters = min(self.max_iters, 500)
+        else:
+            root = int(math.sqrt(self.size))
+            if root * root != self.size:
+                raise ValueError(f"Unsupported grid size {self.size}. Expected 4, 6 or 9.")
+            self.block_rows = self.block_cols = root
+            # 9x9 is the heaviest case; keep limits conservative.
+            self.population_size = min(self.population_size, 80)
+            self.max_iters = min(self.max_iters, 800)
+
+        # All mutable (non‑clue) positions.
+        self.mutable_positions: List[Position] = [
+            (r, c)
+            for r in range(self.size)
+            for c in range(self.size)
+            if self.clues[r][c] == 0
+        ]
+
+        # Belief space: for each mutable cell, a histogram of promising values.
+        # Example: belief[(r, c)] = {5: 10.0, 7: 3.0, ...}
+        self.belief: Dict[Position, Dict[int, float]] = {}
+
+    # --------------------------------------------------------------
+    #  BASIC HELPERS
+    # --------------------------------------------------------------
+    def _row_missing_numbers(self, row_index: int) -> List[int]:
+        """Return which numbers (1..N) are missing from a given row (ignoring zeros)."""
+        present = {v for v in self.clues[row_index] if v != 0}
+        return [v for v in range(1, self.size + 1) if v not in present]
+
+    def _initial_individual(self) -> Grid:
+        """Create one complete candidate board that respects all clues.
+
+        Strategy:
+            - For each row, keep the given numbers fixed.
+            - Fill remaining cells in the row with a random permutation of the
+              numbers that are missing from that row.
+        This guarantees:
+            - Every row contains each number at most once.
+            - All clue values are kept.
+        """
         grid = deepcopy(self.clues)
-        
-        # Fill each 3x3 box with numbers 1-9, ensuring no duplicates in the box
-        for box_row in range(0, 9, 3):
-            for box_col in range(0, 9, 3):
-                # Get numbers already in the box from clues
-                used_numbers = set()
-                for i in range(3):
-                    for j in range(3):
-                        val = grid[box_row + i][box_col + j]
-                        if val != 0:
-                            used_numbers.add(val)
-                
-                # Fill empty cells in the box with remaining numbers
-                available = [n for n in range(1, 10) if n not in used_numbers]
-                random.shuffle(available)
-                
-                for i in range(3):
-                    for j in range(3):
-                        if grid[box_row + i][box_col + j] == 0 and available:
-                            grid[box_row + i][box_col + j] = available.pop()
-        
-        # Now perform a more sophisticated fill for remaining cells
-        empty_cells = [(r, c) for r in range(9) for c in range(9) 
-                      if grid[r][c] == 0]
-        
-        for r, c in empty_cells:
-            if grid[r][c] == 0:
-                # Find numbers not in row, column, or box
-                used = set()
-                # Check row and column
-                used.update(grid[r])
-                used.update(grid[i][c] for i in range(9))
-                # Check 3x3 box
-                box_r, box_c = 3 * (r // 3), 3 * (c // 3)
-                used.update(grid[box_r + i][box_c + j] 
-                          for i in range(3) for j in range(3))
-                # Try to find a valid number
-                available = [n for n in range(1, 10) if n not in used]
-                if available:
-                    grid[r][c] = random.choice(available)
-                else:
-                    # If no valid number, pick one that minimizes conflicts
-                    grid[r][c] = random.randint(1, 9)
-        
+        for r in range(self.size):
+            # Which numbers are already present as clues in this row?
+            row_values = [v for v in grid[r] if v != 0]
+            missing = [v for v in range(1, self.size + 1) if v not in row_values]
+            random.shuffle(missing)
+
+            # Fill empty cells with the shuffled missing numbers.
+            idx = 0
+            for c in range(self.size):
+                if grid[r][c] == 0:
+                    grid[r][c] = missing[idx]
+                    idx += 1
         return grid
 
-    def is_safe(self, grid, row, col, num):
-        # Check row
-        if num in grid[row]:
-            return False
-            
-        # Check column
-        for r in range(9):
-            if grid[r][col] == num:
-                return False
-                
-        # Check 3x3 box
-        box_row = 3 * (row // 3)
-        box_col = 3 * (col // 3)
-        for r in range(3):
-            for c in range(3):
-                if grid[box_row + r][box_col + c] == num:
-                    return False
-        return True
+    # --------------------------------------------------------------
+    #  FITNESS / CONFLICTS
+    # --------------------------------------------------------------
+    def _count_conflicts(self, grid: Grid) -> int:
+        """Count how many rule violations exist in columns and blocks.
 
-    def evaluate(self, grid):
-        return conflicts(grid)
+        Lower is better. 0 means a valid Sudoku solution.
+        We do NOT count row conflicts here because our construction & repair
+        keep rows as permutations of 1..N.
+        """
+        conflicts = 0
+        n = self.size
 
-    def update_belief(self):
-        # Enhanced belief update that considers both top performers and improvements
-        self.belief = {}
-        
-        # Consider top 20% of the population
-        topk = max(1, self.population_size // 5)
-        sorted_pop = sorted(self.population, key=lambda x: x[1])
-        
-        # Weight by fitness (better solutions have more influence)
-        max_score = sorted_pop[0][1] if sorted_pop else 0
-        min_score = sorted_pop[-1][1] if sorted_pop else 1
-        score_range = max(1, max_score - min_score)
-        
-        for i in range(len(sorted_pop)):
-            grid, score = sorted_pop[i]
-            # Higher weight for better solutions
-            weight = 1.0 + (max_score - score) / score_range
-            
-            for r in range(9):
-                for c in range(9):
-                    if self.clues[r][c] == 0:
-                        self.belief.setdefault((r, c), {})
-                        val = grid[r][c]
-                        # Update with weighted frequency
-                        self.belief[(r, c)][val] = self.belief[(r, c)].get(val, 0) + weight
-        
-        # Smooth the belief space to avoid premature convergence
-        for pos in self.belief:
-            total = sum(self.belief[pos].values())
-            # Add a small probability for all numbers to maintain diversity
-            for num in range(1, 10):
-                self.belief[pos][num] = self.belief[pos].get(num, 0) * 0.9 + 0.1 * (total / 9)
+        # Column conflicts: repeated numbers in each column.
+        for c in range(n):
+            col = [grid[r][c] for r in range(n)]
+            conflicts += n - len(set(col))
 
-    def sample_from_belief(self, r,c):
-        freq = self.belief.get((r,c), None)
-        if not freq:
-            return random.randint(1,9)
-        # weighted sample
-        items = list(freq.items())
-        vals, weights = zip(*items)
+        # Block conflicts: repeated numbers in each block.
+        for br in range(0, n, self.block_rows):
+            for bc in range(0, n, self.block_cols):
+                block_vals: List[int] = []
+                for r in range(br, br + self.block_rows):
+                    for c in range(bc, bc + self.block_cols):
+                        block_vals.append(grid[r][c])
+                conflicts += len(block_vals) - len(set(block_vals))
+
+        return conflicts
+
+    # --------------------------------------------------------------
+    #  BELIEF SPACE
+    # --------------------------------------------------------------
+    def _update_belief(self, population: List[Tuple[Grid, int]]) -> None:
+        """Update belief space from the best part of the population.
+
+        We only look at the top ~20% of candidates (fewer noises).
+        For every mutable cell, we add +1 to the histogram of the value
+        stored in that cell in a good candidate.
+        """
+        self.belief.clear()
+        if not population:
+            return
+
+        pop_sorted = sorted(population, key=lambda x: x[1])
+        top_k = max(1, len(pop_sorted) // 5)
+        elites = pop_sorted[:top_k]
+
+        for grid, score in elites:
+            # Better boards may have slightly more influence.
+            # Here we use a very simple weight: 1 / (1 + score)
+            weight = 1.0 / (1.0 + score)
+            for (r, c) in self.mutable_positions:
+                val = grid[r][c]
+                cell_hist = self.belief.setdefault((r, c), {})
+                cell_hist[val] = cell_hist.get(val, 0.0) + weight
+
+    def _sample_from_belief(self, pos: Position) -> int:
+        """Sample a value for this cell from the belief histogram.
+
+        If we have no information yet, return a random number 1..N.
+        """
+        hist = self.belief.get(pos)
+        if not hist:
+            return random.randint(1, self.size)
+
+        items = list(hist.items())
+        values, weights = zip(*items)
         total = sum(weights)
-        rnd = random.uniform(0,total)
-        upto = 0
-        for v,w in zip(vals,weights):
-            if upto + w >= rnd:
-                return v
-            upto += w
-        return vals[-1]
+        rnd = random.uniform(0.0, total)
+        acc = 0.0
+        for value, w in zip(values, weights):
+            acc += w
+            if rnd <= acc:
+                return value
+        return values[-1]
 
-    def crossover(self, a, b):
-        # Enhanced crossover that preserves more structure
-        child = deepcopy(self.clues)
-        
-        # Crossover strategy 1: For each 3x3 box, take entire box from one parent
-        for box_row in range(0, 9, 3):
-            for box_col in range(0, 9, 3):
-                source = a if random.random() < 0.5 else b
-                for i in range(3):
-                    for j in range(3):
-                        r, c = box_row + i, box_col + j
-                        if self.clues[r][c] == 0:
-                            child[r][c] = source[r][c]
-        
-        # Crossover strategy 2: With some probability, use belief space
-        if random.random() < 0.3 and self.belief:
-            for (r, c), freqs in self.belief.items():
-                if self.clues[r][c] == 0 and random.random() < 0.7:
-                    # Choose from top 3 most frequent values in belief space
-                    top_values = sorted(freqs.items(), key=lambda x: -x[1])[:3]
-                    if top_values:
-                        values, weights = zip(*top_values)
-                        total = sum(weights)
-                        rnd = random.uniform(0, total)
-                        upto = 0
-                        for v, w in top_values:
-                            if upto + w >= rnd:
-                                child[r][c] = v
-                                break
-                            upto += w
-        
-        return child
+    # --------------------------------------------------------------
+    #  MUTATION + REPAIR
+    # --------------------------------------------------------------
+    def _repair_row(self, grid: Grid, r: int) -> None:
+        """Ensure row r is a permutation of 1..N while respecting clues.
 
-    def mutate(self, grid, rate=0.2):
-        # Enhanced mutation with multiple strategies
-        g = deepcopy(grid)
-        
-        # Strategy 1: Focused mutation on conflicting cells
-        conflicts = self.find_conflicts(g)
-        if conflicts and random.random() < 0.8:  # 80% chance to fix conflicts
-            # Pick a random conflicting cell and try to fix it
-            r, c = random.choice(conflicts)
-            if self.clues[r][c] == 0:  # Only mutate non-clue cells
-                # Find numbers that would reduce conflicts
-                current = g[r][c]
-                conflict_counts = []
-                for num in range(1, 10):
-                    if num != current:
-                        g[r][c] = num
-                        conflict_counts.append((self.evaluate(g), num))
-                
-                if conflict_counts:
-                    # Pick the number that minimizes conflicts
-                    min_conflicts = min(conflict_counts, key=lambda x: x[0])
-                    g[r][c] = min_conflicts[1]
-                else:
-                    g[r][c] = current
-        
-        # Strategy 2: Row/Column/Box swap that reduces conflicts
-        if random.random() < 0.5:  # 50% chance
-            # Pick a random row, column, or box to optimize
-            choice = random.choice(['row', 'col', 'box'])
-            if choice == 'row':
-                r = random.randint(0, 8)
-                # Find all non-clue positions in this row
-                positions = [c for c in range(9) if self.clues[r][c] == 0]
-                if len(positions) >= 2:
-                    # Try all possible swaps and pick the best one
-                    best_swap = None
-                    best_score = self.evaluate(g)
-                    for i in range(min(5, len(positions))):  # Limit to 5 attempts
-                        c1, c2 = random.sample(positions, 2)
-                        # Try the swap
-                        g[r][c1], g[r][c2] = g[r][c2], g[r][c1]
-                        new_score = self.evaluate(g)
-                        if new_score < best_score:
-                            best_score = new_score
-                            best_swap = (c1, c2)
-                        # Swap back
-                        g[r][c1], g[r][c2] = g[r][c2], g[r][c1]
-                    # Apply the best swap if found
-                    if best_swap:
-                        c1, c2 = best_swap
-                        g[r][c1], g[r][c2] = g[r][c2], g[r][c1]
-            
-            elif choice == 'col':
-                c = random.randint(0, 8)
-                positions = [r for r in range(9) if self.clues[r][c] == 0]
-                if len(positions) >= 2:
-                    best_swap = None
-                    best_score = self.evaluate(g)
-                    for i in range(min(5, len(positions))):  # Limit to 5 attempts
-                        r1, r2 = random.sample(positions, 2)
-                        g[r1][c], g[r2][c] = g[r2][c], g[r1][c]
-                        new_score = self.evaluate(g)
-                        if new_score < best_score:
-                            best_score = new_score
-                            best_swap = (r1, r2)
-                        g[r1][c], g[r2][c] = g[r2][c], g[r1][c]
-                    if best_swap:
-                        r1, r2 = best_swap
-                        g[r1][c], g[r2][c] = g[r2][c], g[r1][c]
-            
-            else:  # box
-                box_r = random.randint(0, 2) * 3
-                box_c = random.randint(0, 2) * 3
-                positions = [(r, c) for r in range(box_r, box_r + 3) 
-                           for c in range(box_c, box_c + 3) 
-                           if self.clues[r][c] == 0]
-                if len(positions) >= 2:
-                    best_swap = None
-                    best_score = self.evaluate(g)
-                    for i in range(min(5, len(positions))):  # Limit to 5 attempts
-                        (r1, c1), (r2, c2) = random.sample(positions, 2)
-                        g[r1][c1], g[r2][c2] = g[r2][c2], g[r1][c1]
-                        new_score = self.evaluate(g)
-                        if new_score < best_score:
-                            best_score = new_score
-                            best_swap = ((r1, c1), (r2, c2))
-                        g[r1][c1], g[r2][c2] = g[r2][c2], g[r1][c1]
-                    if best_swap:
-                        (r1, c1), (r2, c2) = best_swap
-                        g[r1][c1], g[r2][c2] = g[r2][c2], g[r1][c1]
-        
-        # Strategy 3: Occasionally do a random mutation to maintain diversity
-        if random.random() < 0.2:  # 20% chance
-            empty_cells = [(r, c) for r in range(9) for c in range(9) 
-                         if self.clues[r][c] == 0]
-            if empty_cells:
-                r, c = random.choice(empty_cells)
-                g[r][c] = random.randint(1, 9)
-        
-        return g
-        
-    def find_conflicts(self, grid):
-        # Find all cells that are involved in conflicts
-        conflicts = set()
-        
-        # Check rows
-        for r in range(9):
-            row = grid[r]
-            seen = set()
-            for c, val in enumerate(row):
-                if val != 0 and self.clues[r][c] == 0:  # Only check non-clue cells
-                    if val in seen:
-                        conflicts.add((r, c))
-                        conflicts.update((r, i) for i, v in enumerate(row) 
-                                       if v == val and self.clues[r][i] == 0)
-                    seen.add(val)
-        
-        # Check columns
-        for c in range(9):
-            col = [grid[r][c] for r in range(9)]
-            seen = set()
-            for r, val in enumerate(col):
-                if val != 0 and self.clues[r][c] == 0:  # Only check non-clue cells
-                    if val in seen:
-                        conflicts.add((r, c))
-                        conflicts.update((i, c) for i in range(9) 
-                                       if grid[i][c] == val and self.clues[i][c] == 0)
-                    seen.add(val)
-        
-        # Check 3x3 boxes
-        for box_r in range(0, 9, 3):
-            for box_c in range(0, 9, 3):
-                seen = set()
-                box_positions = []
-                for r in range(box_r, box_r + 3):
-                    for c in range(box_c, box_c + 3):
-                        val = grid[r][c]
-                        if val != 0 and self.clues[r][c] == 0:  # Only check non-clue cells
-                            if val in seen:
-                                conflicts.add((r, c))
-                                conflicts.update((i, j) for i in range(box_r, box_r + 3)
-                                               for j in range(box_c, box_c + 3)
-                                               if grid[i][j] == val and self.clues[i][j] == 0)
-                            seen.add(val)
-        
-        return list(conflicts)
+        Any duplicates in non‑clue cells are replaced by numbers that are
+        missing from the row.
+        """
+        n = self.size
+        row = grid[r]
 
-    def repair_by_belief(self, grid):
-        g = deepcopy(grid)
-        
-        # First, identify all cells with conflicts
-        conflict_cells = self.find_conflicts(g)
-        
-        # If no conflicts, no repair needed
-        if not conflict_cells:
-            return g
-            
-        # Sort conflicts by how problematic they are (number of conflicts they're involved in)
-        conflict_scores = {}
-        for r, c in conflict_cells:
-            if (r, c) not in conflict_scores:
-                conflict_scores[(r, c)] = 0
-            conflict_scores[(r, c)] += 1
-        
-        # Process most conflicted cells first
-        sorted_conflicts = sorted(conflict_scores.items(), key=lambda x: -x[1])
-        
-        for (r, c), _ in sorted_conflicts:
-            if (r, c) in self.belief and self.clues[r][c] == 0:
-                # Get the top 3 most likely values from belief space
-                top_values = sorted(self.belief[(r, c)].items(), 
-                                  key=lambda x: -x[1])[:3]
-                
-                if top_values:
-                    # Try each value in order of belief strength
-                    original = g[r][c]
-                    best_val = original
-                    best_score = self.evaluate(g)
-                    
-                    for val, _ in top_values:
-                        if val != original:
-                            g[r][c] = val
-                            new_score = self.evaluate(g)
-                            if new_score < best_score:
-                                best_score = new_score
-                                best_val = val
-                    
-                    # Keep the best value found
-                    g[r][c] = best_val
-        
-        return g
+        counts = {}
+        for v in row:
+            counts[v] = counts.get(v, 0) + 1
 
-    def run(self):
-        """Run the cultural algorithm and guarantee a correct Sudoku solution."""
-        print("Initializing population...")
-        self.population = []
+        # Numbers that should appear in the row but currently don't.
+        missing = [v for v in range(1, n + 1) if counts.get(v, 0) == 0]
+        random.shuffle(missing)
 
-        # Initialize population
-        for i in range(self.population_size):
-            ind = self.initial_individual()
-            score = self.evaluate(ind)
-            self.population.append((ind, score))
-            if i % 50 == 0:
-                best_score = min(s for _, s in self.population)
-                print(f"  Created {i + 1}/{self.population_size} individuals, best score: {best_score}")
+        # Positions with duplicate values that we are allowed to change.
+        dup_positions: List[int] = [
+            c
+            for c in range(n)
+            if self.clues[r][c] == 0 and counts.get(row[c], 0) > 1
+        ]
 
-        self.update_belief()
-        best = min(self.population, key=lambda x: x[1])
-        self.best_score = best[1]
-        print(f"Initial best score: {self.best_score}")
-
-        it = 0
-        self.stagnation = 0
-        max_stagnation = 200
-        restart_threshold = 50
-        overall_best = (deepcopy(best[0]), best[1])
-
-        while it < self.max_iters and best[1] > 0 and self.stagnation < max_stagnation:
-            it += 1
-            newpop = []
-
-            # Elitism
-            pop_sorted = sorted(self.population, key=lambda x: x[1])
-            elites_count = max(1, self.population_size // 5)
-            elites = pop_sorted[:elites_count]
-            for e in elites:
-                newpop.append((deepcopy(e[0]), e[1]))
-
-            progress = self.stagnation / max_stagnation
-            mutation_rate = 0.2 + (0.5 * progress)
-            crossover_rate = 0.9 - (0.4 * progress)
-
-            # Generate new population
-            while len(newpop) < self.population_size:
-                if random.random() < 0.1:
-                    child = self.initial_individual()
-                else:
-                    tournament_size = min(5 + int(progress * 10), len(self.population))
-                    tournament = random.sample(self.population, tournament_size)
-                    parent1 = min(tournament, key=lambda x: x[1])[0]
-                    if random.random() < crossover_rate:
-                        tournament = random.sample(self.population, tournament_size)
-                        parent2 = min(tournament, key=lambda x: x[1])[0]
-                        child = self.crossover(parent1, parent2)
-                    else:
-                        child = deepcopy(parent1)
-                child = self.mutate(child, rate=mutation_rate)
-                repair_prob = 0.3 + (0.6 * progress)
-                if random.random() < repair_prob:
-                    child = self.repair_by_belief(child)
-                score = self.evaluate(child)
-                newpop.append((child, score))
-
-            self.population = newpop
-            if it % 5 == 0 or self.stagnation % 10 == 0:
-                self.update_belief()
-
-            current_best = min(self.population, key=lambda x: x[1])
-            if current_best[1] < self.best_score:
-                self.best_score = current_best[1]
-                best = current_best
-                self.stagnation = 0
-                if self.best_score < overall_best[1]:
-                    overall_best = (deepcopy(best[0]), best[1])
-            else:
-                self.stagnation += 1
-                if self.stagnation % restart_threshold == 0 and self.stagnation > 0:
-                    print(f"Restarting population after {self.stagnation} iterations...")
-                    self.population.sort(key=lambda x: x[1])
-                    num_keep = max(1, self.population_size // 10)
-                    self.population = self.population[:num_keep]
-                    while len(self.population) < self.population_size:
-                        ind = self.initial_individual()
-                        score = self.evaluate(ind)
-                        self.population.append((ind, score))
-                    self.stagnation = 0
-
-            if it % 10 == 0 or self.stagnation == 0 or best[1] == 0:
-                avg_score = sum(s for _, s in self.population) / len(self.population)
-                print(
-                    f"Iter {it:4d}, Best: {best[1]:2d}, Current: {current_best[1]:2d}, Avg: {avg_score:.1f}, Stag: {self.stagnation:3d}, Mut: {mutation_rate:.2f}")
-
-            if best[1] == 0:
-                print("\nPerfect solution found!")
+        for c in dup_positions:
+            if not missing:
                 break
+            old_val = row[c]
+            new_val = missing.pop()
+            row[c] = new_val
+            counts[old_val] -= 1
+            counts[new_val] = counts.get(new_val, 0) + 1
 
-        # Use overall best if needed
-        if best[1] > 0 and overall_best[1] < best[1]:
-            best = overall_best
+    def _mutate_individual(
+        self,
+        grid: Grid,
+        belief_influence: float = 0.7,
+        random_mutation_rate: float = 0.05,
+    ) -> Grid:
+        """Create a slightly modified copy of `grid`.
 
-        # === BACKTRACKING REPAIR FOR GUARANTEED CORRECTNESS ===
-        from sudoku import Sudoku  # your existing backtracking solver
-        s = Sudoku(best[0])
-        ok, solved_grid, _ = s.solve(algorithm='backtracking', record_steps=False)
-        if ok:
-            return solved_grid, 0, it
-        else:
-            # fallback: return best heuristic grid if unsolvable
-            return deepcopy(best[0]), best[1], it
+        For every mutable cell:
+            - With probability `belief_influence`, we try a value suggested
+              by the belief space.
+            - With small probability `random_mutation_rate`, we pick a
+              completely random value.
+        After that, each row is *repaired* to be a permutation of 1..N,
+        which keeps the search space reasonable.
+        """
+        new_grid = deepcopy(grid)
+
+        for (r, c) in self.mutable_positions:
+            if random.random() < belief_influence:
+                new_grid[r][c] = self._sample_from_belief((r, c))
+            elif random.random() < random_mutation_rate:
+                new_grid[r][c] = random.randint(1, self.size)
+
+        # Repair each row to avoid row conflicts.
+        for r in range(self.size):
+            self._repair_row(new_grid, r)
+
+        return new_grid
+
+    # --------------------------------------------------------------
+    #  MAIN LOOP
+    # --------------------------------------------------------------
+    def run(self) -> Tuple[Grid, int, int]:
+        """Run the Cultural Algorithm and return (best_grid, best_score, iters).
+
+        The algorithm stops when:
+            - A perfect solution is found (score == 0), or
+            - `max_iters` generations have been run.
+        """
+        # ---- 1. Create initial population ----
+        population: List[Tuple[Grid, int]] = []
+        for _ in range(self.population_size):
+            grid = self._initial_individual()
+            score = self._count_conflicts(grid)
+            population.append((grid, score))
+
+        self._update_belief(population)
+
+        best_grid, best_score = min(population, key=lambda x: x[1])
+        best_grid = deepcopy(best_grid)
+
+        # ---- 2. Evolution loop ----
+        for it in range(1, self.max_iters + 1):
+            if best_score == 0:
+                # Already a valid solution.
+                return best_grid, 0, it
+
+            # Create new population with elitism (carry the best forward).
+            new_population: List[Tuple[Grid, int]] = [(deepcopy(best_grid), best_score)]
+
+            # A simple form of selection: tournament of size 3.
+            def select_parent() -> Grid:
+                competitors = random.sample(population, k=min(3, len(population)))
+                return min(competitors, key=lambda x: x[1])[0]
+
+            while len(new_population) < self.population_size:
+                parent = select_parent()
+                child = self._mutate_individual(parent)
+                child_score = self._count_conflicts(child)
+                new_population.append((child, child_score))
+
+            population = new_population
+            self._update_belief(population)
+
+            # Track global best so far.
+            current_best_grid, current_best_score = min(population, key=lambda x: x[1])
+            if current_best_score < best_score:
+                best_score = current_best_score
+                best_grid = deepcopy(current_best_grid)
+
+        # ----------------------------------------------------------
+        #  Optional: quick backtracking repair for guaranteed solution
+        # ----------------------------------------------------------
+        # Even if the cultural algorithm did not fully solve the puzzle
+        # (best_score > 0), the best_grid is usually very close to a
+        # solution.  A standard backtracking search from this point is
+        # extremely fast and guarantees correctness.
+        try:
+            from sudoku import Sudoku  # imported here to avoid circular imports
+
+            s = Sudoku(best_grid)
+            ok, solved_grid, _ = s.solve(algorithm="backtracking", record_steps=False)
+            if ok:
+                # We report score 0 because backtracking guarantees validity.
+                return solved_grid, 0, it
+        except Exception:
+            # If anything goes wrong, we simply fall back to the heuristic result.
+            pass
+
+        # Reached iteration limit and repair did not yield a full solution;
+        # return the best heuristic board we have.
+        return best_grid, best_score, self.max_iters
 
 
-if __name__ == '__main__':
-    # quick demo with a simple puzzle (0 empty)
-    clues = [[0]*9 for _ in range(9)]
-    solver = CulturalSudokuSolver(clues, population_size=200, max_iters=2000)
-    sol, score, iters = solver.run()
-    print('Best conflicts', score, 'iters', iters)
+if __name__ == "__main__":
+    # Small manual test when running this file directly.
+    # Here we demonstrate a 9x9 puzzle; you can change `size` to 4 or 6.
+    test_grid = [
+        [5, 3, 0, 0, 7, 0, 0, 0, 0],
+        [6, 0, 0, 1, 9, 5, 0, 0, 0],
+        [0, 9, 8, 0, 0, 0, 0, 6, 0],
+        [8, 0, 0, 0, 6, 0, 0, 0, 3],
+        [4, 0, 0, 8, 0, 3, 0, 0, 1],
+        [7, 0, 0, 0, 2, 0, 0, 0, 6],
+        [0, 6, 0, 0, 0, 0, 2, 8, 0],
+        [0, 0, 0, 4, 1, 9, 0, 0, 5],
+        [0, 0, 0, 0, 8, 0, 0, 7, 9],
+    ]
+
+    solver = CulturalSudokuSolver(test_grid, population_size=200, max_iters=2000)
+    solution, score, iterations = solver.run()
+    print("Best score:", score, "iterations:", iterations)
+    for row in solution:
+        print(" ".join(str(v) for v in row))

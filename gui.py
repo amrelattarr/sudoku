@@ -72,9 +72,15 @@ class SudokuGUI:
         self.grid_frame.pack(expand=True, pady=20, padx=20)  # Added more padding
 
         # Calculate block size for the grid
-        block_size = int(self.grid_size ** 0.5)
-        if block_size * block_size != self.grid_size:
-            block_size = 3  # Default to 3 if not a perfect square
+        if self.grid_size == 9:
+            block_rows, block_cols = 3, 3
+        elif self.grid_size == 6:
+            block_rows, block_cols = 2, 3
+        elif self.grid_size == 4:
+            block_rows, block_cols = 2, 2
+        else:
+            root = int(self.grid_size ** 0.5)
+            block_rows, block_cols = root, root
 
         # Create grid of Entry widgets
         for r in range(self.grid_size):
@@ -116,9 +122,9 @@ class SudokuGUI:
                 
                 # Set thicker borders for blocks
                 border_width = 2
-                if r % block_size == 0:  # Top border of block
+                if r % block_rows == 0:  # Top border of block
                     cell_frame.grid(pady=(border_width, 0))
-                if c % block_size == 0:  # Left border of block
+                if c % block_cols == 0:  # Left border of block
                     cell_frame.grid(padx=(border_width, 0))
                 if r == self.grid_size - 1:  # Bottom border of grid
                     cell_frame.grid(pady=(0, border_width))

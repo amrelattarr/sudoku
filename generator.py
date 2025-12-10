@@ -7,7 +7,17 @@ from copy import deepcopy
 
 def _is_safe(grid, r, c, val):
     size = len(grid)
-    block_size = int(size ** 0.5)
+    
+    # Determine block dimensions based on grid size
+    if size == 9:
+        block_rows, block_cols = 3, 3
+    elif size == 6:
+        block_rows, block_cols = 2, 3
+    elif size == 4:
+        block_rows, block_cols = 2, 2
+    else:
+        root = int(size ** 0.5)
+        block_rows, block_cols = root, root
     
     # row
     if any(grid[r][j] == val for j in range(size)):
@@ -16,9 +26,11 @@ def _is_safe(grid, r, c, val):
     if any(grid[i][c] == val for i in range(size)):
         return False
     # block
-    br, bc = block_size * (r // block_size), block_size * (c // block_size)
-    for i in range(br, min(br + block_size, size)):
-        for j in range(bc, min(bc + block_size, size)):
+    br = (r // block_rows) * block_rows
+    bc = (c // block_cols) * block_cols
+    
+    for i in range(br, min(br + block_rows, size)):
+        for j in range(bc, min(bc + block_cols, size)):
             if grid[i][j] == val:
                 return False
     return True

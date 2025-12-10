@@ -6,10 +6,22 @@ class Sudoku:
     def __init__(self, grid):
         self.grid = deepcopy(grid)  # NxN grid, 0 for empty
         self.size = len(grid)
-        self.block_size = int(self.size ** 0.5)
-        # Ensure block_size is valid (for 4x4, block_size should be 2)
-        if self.block_size * self.block_size != self.size and self.size == 4:
-            self.block_size = 2
+        
+        # Determine block dimensions based on grid size
+        if self.size == 9:
+            self.block_rows = 3
+            self.block_cols = 3
+        elif self.size == 6:
+            self.block_rows = 2
+            self.block_cols = 3
+        elif self.size == 4:
+            self.block_rows = 2
+            self.block_cols = 2
+        else:
+            # Fallback for square grids
+            self.block_rows = int(self.size ** 0.5)
+            self.block_cols = int(self.size ** 0.5)
+            
         self.steps = []  # (r,c,val, action) action: 'place' or 'remove'
 
     def find_empty(self):
@@ -27,9 +39,11 @@ class Sudoku:
         if any(self.grid[i][c] == val for i in range(self.size)):
             return False
         # block
-        br, bc = self.block_size * (r // self.block_size), self.block_size * (c // self.block_size)
-        for i in range(br, min(br + self.block_size, self.size)):
-            for j in range(bc, min(bc + self.block_size, self.size)):
+        br = (r // self.block_rows) * self.block_rows
+        bc = (c // self.block_cols) * self.block_cols
+        
+        for i in range(br, min(br + self.block_rows, self.size)):
+            for j in range(bc, min(bc + self.block_cols, self.size)):
                 if self.grid[i][j] == val:
                     return False
         return True
