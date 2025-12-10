@@ -3,7 +3,7 @@
 from copy import deepcopy
 
 class Sudoku:
-    def __init__(self, grid):
+    def __init__(self, grid, callback=None):
         self.grid = deepcopy(grid)  # NxN grid, 0 for empty
         self.size = len(grid)
         
@@ -23,6 +23,9 @@ class Sudoku:
             self.block_cols = int(self.size ** 0.5)
             
         self.steps = []  # (r,c,val, action) action: 'place' or 'remove'
+        self.callback = callback  # For real-time metrics updates
+        self.backtrack_count = 0  # Track number of backtracks
+        self.step_count = 0  # Track number of steps
 
     def find_empty(self):
         for r in range(self.size):
@@ -56,18 +59,28 @@ class Sudoku:
         for val in range(1, self.size + 1):
             if self.valid(r, c, val):
                 self.grid[r][c] = val
+                self.step_count += 1
                 if record_steps:
                     self.steps.append((r, c, val, 'place'))
+                # Call callback for real-time metrics update
+                if self.callback:
+                    self.callback('step', self.step_count, self.backtrack_count)
                 if self.solve_backtracking(record_steps):
                     return True
                 # backtrack
                 self.grid[r][c] = 0
+                self.backtrack_count += 1
                 if record_steps:
                     self.steps.append((r, c, val, 'remove'))
+                # Call callback for backtrack update
+                if self.callback:
+                    self.callback('backtrack', self.step_count, self.backtrack_count)
         return False
 
     def solve(self, algorithm='backtracking', **kwargs):
         self.steps.clear()
+        self.backtrack_count = 0
+        self.step_count = 0
         if algorithm == 'backtracking':
             grid_copy = deepcopy(self.grid)
             solved = self.solve_backtracking(record_steps=kwargs.get('record_steps', True))

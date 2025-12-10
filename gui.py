@@ -7,6 +7,8 @@ from sudoku import Sudoku
 from cultural_solver import CulturalSudokuSolver
 from generator import generate_random_puzzle
 import time
+import datetime
+import threading
 
 
 class SudokuGUI:
@@ -15,7 +17,7 @@ class SudokuGUI:
         root.title('Sudoku Solver')
         
         # Configure window size and minimum size
-        root.geometry('1000x750')
+        root.geometry('1100x800')
         root.minsize(900, 650)
         
         # Configure grid weights to make the layout responsive
@@ -34,6 +36,19 @@ class SudokuGUI:
         self.grid_frame = None
         self.is_solving = False  # Flag to track if animation is running
         self.animation_speed = 50  # Delay in milliseconds between steps
+        
+        # Performance metrics
+        self.metrics = {
+            'elapsed_time': 0,
+            'steps': 0,
+            'backtracks': 0,
+            'generations': 0,
+            'initial_conflicts': 0,
+            'final_conflicts': 0,
+            'mutations': 0,
+            'belief_updates': 0
+        }
+        self.start_time = None
         
         # Set application style
         self.set_style()
@@ -67,11 +82,21 @@ class SudokuGUI:
         if not hasattr(self, 'right_frame') or not self.right_frame.winfo_exists():
             self.right_frame = tk.Frame(self.main_container, bg='#f0f0f0')
             self.right_frame.pack(side='right', fill='both', expand=True, padx=(0, 20), pady=10)
+            
+            # Configure grid layout for right frame
+            self.right_frame.grid_rowconfigure(0, weight=1)
+            self.right_frame.grid_columnconfigure(0, weight=1)
+            self.right_frame.grid_columnconfigure(1, weight=0)
         
-        # Create a frame for the grid with a nice border (larger padding)
+        # Create a frame for the grid with a nice border - using grid layout
         self.grid_frame = tk.Frame(self.right_frame, bg='#000000', padx=3, pady=3,
                                  highlightthickness=1, highlightbackground='#cccccc')
-        self.grid_frame.pack(expand=True, pady=20, padx=20)  # Added more padding
+        self.grid_frame.grid(row=0, column=0, sticky='', padx=(20, 10), pady=20)
+        
+        # Build scrollable metrics panel (only once)
+        if not hasattr(self, 'metrics_scroll_setup'):
+            self.build_scrollable_metrics_panel(self.right_frame)
+            self.metrics_scroll_setup = True
 
         # Calculate block size for the grid
         if self.grid_size == 9:
@@ -132,6 +157,187 @@ class SudokuGUI:
                     cell_frame.grid(pady=(0, border_width))
                 if c == self.grid_size - 1:  # Right border of grid
                     cell_frame.grid(padx=(0, border_width))
+    
+    def build_scrollable_metrics_panel(self, parent):
+        """Build the scrollable performance metrics panel."""
+        # Outer frame with title
+        metrics_outer_frame = tk.LabelFrame(
+            parent,
+            text='Performance History',
+            bg='#f0f0f0',
+            font=('Arial', 12, 'bold'),
+            fg='#2c3e50',
+            padx=5,
+            pady=5,
+            relief='solid',
+            borderwidth=1,
+            width=280,
+            height=500
+        )
+        metrics_outer_frame.grid(row=0, column=1, sticky='ns', padx=(10, 20), pady=20)
+        metrics_outer_frame.grid_propagate(False)  # Prevent resizing based on content
+        
+        # Create canvas and scrollbar
+        canvas_frame = tk.Frame(metrics_outer_frame, bg='#f0f0f0')
+        canvas_frame.pack(fill='both', expand=True)
+        
+        # Scrollbar
+        scrollbar = tk.Scrollbar(canvas_frame, orient='vertical')
+        scrollbar.pack(side='right', fill='y')
+        
+        # Canvas
+        self.metrics_canvas = tk.Canvas(
+            canvas_frame,
+            bg='#f0f0f0',
+            yscrollcommand=scrollbar.set,
+            highlightthickness=0,
+            width=250
+        )
+        self.metrics_canvas.pack(side='left', fill='both', expand=True)
+        scrollbar.config(command=self.metrics_canvas.yview)
+        
+        # Container inside canvas for all metrics cards
+        self.metrics_container = tk.Frame(self.metrics_canvas, bg='#f0f0f0')
+        self.metrics_canvas_window = self.metrics_canvas.create_window(
+            0, 0, window=self.metrics_container, anchor='nw'
+        )
+        
+        # Update scrollregion when content changes
+        def on_configure(event):
+            self.metrics_canvas.configure(scrollregion=self.metrics_canvas.bbox('all'))
+        self.metrics_container.bind('<Configure>', on_configure)
+        
+        # Bind mousewheel for scrolling only when mouse is over the canvas
+        def on_mousewheel(event):
+            self.metrics_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        def bind_mousewheel(event):
+            self.metrics_canvas.bind("<MouseWheel>", on_mousewheel)
+        
+        def unbind_mousewheel(event):
+            self.metrics_canvas.unbind("<MouseWheel>")
+        
+        # Bind enter/leave events to control mousewheel scrolling
+        self.metrics_canvas.bind("<Enter>", bind_mousewheel)
+        self.metrics_canvas.bind("<Leave>", unbind_mousewheel)
+        
+        # Keep track of metric cards
+        self.metrics_cards = []
+        self.current_card = None
+        self.should_auto_scroll = True  # Flag for auto-scroll on new cards
+    
+    def add_metrics_card(self, algorithm):
+        """Add a new metrics card for the current solve."""
+        # Create card frame
+        card_frame = tk.Frame(
+            self.metrics_container,
+            bg='#ffffff',
+            relief='solid',
+            borderwidth=1,
+            padx=10,
+            pady=10
+        )
+        card_frame.pack(fill='x', pady=5, padx=5)
+        
+        # Timestamp
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        timestamp_label = tk.Label(
+            card_frame,
+            text=f'Solve at {timestamp}',
+            bg='#ffffff',
+            font=('Arial', 9),
+            fg='#7f8c8d',
+            anchor='w'
+        )
+        timestamp_label.pack(fill='x', pady=(0, 5))
+        
+        # Algorithm name
+        algo_name = 'Backtracking' if algorithm == 'backtracking' else 'Cultural Evolution'
+        algo_label = tk.Label(
+            card_frame,
+            text=f'Algorithm: {algo_name}',
+            bg='#ffffff',
+            font=('Arial', 10, 'bold'),
+            fg='#3498db',
+            anchor='w'
+        )
+        algo_label.pack(fill='x', pady=(0, 8))
+        
+        # Separator
+        separator = ttk.Separator(card_frame, orient='horizontal')
+        separator.pack(fill='x', pady=5)
+        
+        # Metrics container
+        metrics_data = {}
+        
+        # Create the card's metric storage
+        card = {
+            'frame': card_frame,
+            'algorithm': algorithm,
+            'metrics': metrics_data,
+            'timestamp': timestamp
+        }
+        
+        self.metrics_cards.append(card)
+        self.current_card = card
+        
+        # Force immediate scroll to bottom with multiple update calls
+        def scroll_to_bottom():
+            self.metrics_canvas.update_idletasks()
+            self.metrics_canvas.configure(scrollregion=self.metrics_canvas.bbox('all'))
+            self.metrics_canvas.yview_moveto(1.0)
+        
+        # Execute scroll immediately and after a short delay to ensure it works
+        scroll_to_bottom()
+        self.root.after(10, scroll_to_bottom)
+        self.root.after(50, scroll_to_bottom)
+        
+        return card
+    
+    def add_metric_to_card(self, card, key, label_text, value):
+        """Add a metric row to a specific card."""
+        if key in card['metrics']:
+            # Update existing metric
+            card['metrics'][key]['value'].config(text=str(value))
+        else:
+            # Create new metric row
+            row_frame = tk.Frame(card['frame'], bg='#ffffff')
+            row_frame.pack(fill='x', pady=3)
+            
+            label = tk.Label(
+                row_frame,
+                text=label_text,
+                bg='#ffffff',
+                font=('Arial', 9, 'bold'),
+                fg='#34495e',
+                anchor='w',
+                width=14
+            )
+            label.pack(side='left')
+            
+            value_label = tk.Label(
+                row_frame,
+                text=str(value),
+                bg='#ffffff',
+                font=('Arial', 9),
+                fg='#2ecc71',
+                anchor='e'
+            )
+            value_label.pack(side='right', fill='x', expand=True)
+            
+            card['metrics'][key] = {
+                'frame': row_frame,
+                'label': label,
+                'value': value_label
+            }
+    
+    def update_current_metric(self, key, label_text, value):
+        """Update a metric in the current card (thread-safe)."""
+        def update():
+            if self.current_card:
+                self.add_metric_to_card(self.current_card, key, label_text, value)
+        # Use after() for thread-safe GUI updates
+        self.root.after(0, update)
 
     # ----------------------------------------------------------
     #  CONTROL PANEL
@@ -322,7 +528,7 @@ class SudokuGUI:
                 e.delete(0, 'end')
                 if val != 0:
                     e.insert(0, str(val))
-                    e.config(fg='blue')
+                    e.config(fg='black')  # Original clues in black
                 else:
                     e.config(fg='black')
 
@@ -435,11 +641,11 @@ class SudokuGUI:
                 entry.delete(0, 'end')
                 if val != 0:
                     entry.insert(0, str(val))
-                    # Color original clues in blue, solved cells in green
+                    # Color original clues in black, solved cells in green
                     if (r, c) in self.original_empties:
-                        entry.config(fg='green')
+                        entry.config(fg='blue')  # Solved cells in green
                     else:
-                        entry.config(fg='blue')
+                        entry.config(fg='black')  # Original clues in black
         self.status_label.config(text=f'Solved! Animation complete.')
     
     # ----------------------------------------------------------
@@ -521,42 +727,119 @@ class SudokuGUI:
 
             # Backtracking
             if algo == 'backtracking':
-                s = Sudoku(grid)
-                # Enable step recording for visualization
-                ok, solved_grid, steps = s.solve(algorithm='backtracking', record_steps=True)
-                elapsed = time.time() - start
+                # Create new metrics card for this solve
+                self.add_metrics_card('backtracking')
+                self.start_time = start
+                
+                # Run solver in separate thread
+                def solve_backtracking_thread():
+                    try:
+                        # Create solver with callback
+                        def backtrack_callback(event_type, steps, backtracks):
+                            elapsed = time.time() - self.start_time
+                            self.update_current_metric('elapsed_time', 'Elapsed Time:', f'{elapsed:.2f}s')
+                            self.update_current_metric('steps', 'Steps:', f'{steps:,}')
+                            self.update_current_metric('backtracks', 'Backtracks:', f'{backtracks:,}')
+                        
+                        s = Sudoku(grid, callback=backtrack_callback)
+                        # Enable step recording for visualization
+                        ok, solved_grid, steps = s.solve(algorithm='backtracking', record_steps=True)
+                        elapsed = time.time() - start
 
-                if ok:
-                    self.status_label.config(text=f'Animating solution... ({len(steps)} steps)')
-                    # Start animation
-                    self.animate_steps(steps, solved_grid)
-                else:
-                    self.status_label.config(text='Backtracking could not solve this puzzle.')
+                        # Schedule GUI updates on main thread
+                        def finalize():
+                            if ok:
+                                # Final metric update
+                                self.update_current_metric('elapsed_time', 'Elapsed Time:', f'{elapsed:.2f}s')
+                                self.update_current_metric('steps', 'Steps:', f'{len(steps):,}')
+                                self.update_current_metric('backtracks', 'Backtracks:', f'{s.backtrack_count:,}')
+                                
+                                self.status_label.config(text=f'Animating solution... ({len(steps)} steps)')
+                                # Start animation
+                                self.animate_steps(steps, solved_grid)
+                            else:
+                                self.status_label.config(text='Backtracking could not solve this puzzle.')
+                        
+                        self.root.after(0, finalize)
+                    except Exception as e:
+                        self.root.after(0, lambda: self.status_label.config(text=f'Error: {str(e)}'))
+                        print(f"Error in backtracking thread: {e}")
+                
+                # Start thread
+                threading.Thread(target=solve_backtracking_thread, daemon=True).start()
 
             # Cultural Algorithm
             else:
+                # Create new metrics card for this solve
+                self.add_metrics_card('cultural')
+                self.start_time = start
+                
                 # Adjust population size based on grid size
                 population_size = min(300, self.grid_size * 30)  # Smaller grid needs smaller population
                 max_iters = 5000 if self.grid_size == 9 else 3000  # Fewer iterations for smaller grids
                 
-                try:
-                    solver = CulturalSudokuSolver(grid, population_size=population_size, max_iters=max_iters)
-                    sol, score, iters = solver.run()
-                    elapsed = time.time() - start
+                # Run solver in separate thread
+                def solve_cultural_thread():
+                    try:
+                        # Create solver with callback
+                        def cultural_callback(generation, conflicts, mutations, belief_updates):
+                            elapsed = time.time() - self.start_time
+                            self.update_current_metric('elapsed_time', 'Elapsed Time:', f'{elapsed:.2f}s')
+                            self.update_current_metric('generations', 'Generations:', f'{generation:,}')
+                            
+                            # Calculate improvement rate
+                            if hasattr(self, '_initial_conflicts') and self._initial_conflicts > 0:
+                                improvement = ((self._initial_conflicts - conflicts) / self._initial_conflicts) * 100
+                                self.update_current_metric('improvement', 'Improvement:', f'{improvement:.1f}%')
+                            else:
+                                self._initial_conflicts = conflicts
+                                self.update_current_metric('improvement', 'Improvement:', '0.0%')
+                            
+                            self.update_current_metric('mutations', 'Mutations:', f'{mutations:,}')
+                            self.update_current_metric('belief_updates', 'Belief Updates:', f'{belief_updates:,}')
+                        
+                        solver = CulturalSudokuSolver(grid, population_size=population_size, 
+                                                     max_iters=max_iters, callback=cultural_callback)
+                        sol, score, iters = solver.run()
+                        elapsed = time.time() - start
 
-                    if score == 0:
-                        # First load the solved puzzle with default colors
-                        self.load_puzzle(sol)
-                        # Then update colors for solved cells
-                        for r, c in self.original_empties:
-                            self.entries[r][c].config(fg='black')
-                        self.status_label.config(text=f'Cultural Algorithm solved in {iters} iterations ({elapsed:.2f}s).')
-                    else:
-                        self.load_puzzle(sol)
-                        self.status_label.config(text=f'Best solution has {score} conflicts — after {iters} iterations.')
-                except Exception as e:
-                    self.status_label.config(text=f'Error in Cultural Algorithm: {str(e)}')
-                    print(f"Error in Cultural Algorithm: {e}")
+                        # Schedule GUI updates on main thread
+                        def finalize():
+                            try:
+                                # Final metric update
+                                self.update_current_metric('elapsed_time', 'Elapsed Time:', f'{elapsed:.2f}s')
+                                self.update_current_metric('generations', 'Generations:', f'{iters:,}')
+                                if hasattr(self, '_initial_conflicts') and self._initial_conflicts > 0:
+                                    improvement = ((self._initial_conflicts - score) / self._initial_conflicts) * 100
+                                    self.update_current_metric('improvement', 'Improvement:', f'{improvement:.1f}%')
+                                self.update_current_metric('mutations', 'Mutations:', f'{solver.mutation_count:,}')
+                                self.update_current_metric('belief_updates', 'Belief Updates:', f'{solver.belief_update_count:,}')
+
+                                if score == 0:
+                                    # First load the solved puzzle with default colors
+                                    self.load_puzzle(sol)
+                                    # Then update colors for solved cells
+                                    for r, c in self.original_empties:
+                                        self.entries[r][c].config(fg='blue')  # Solved cells in green
+                                    self.status_label.config(text=f'Cultural Algorithm solved in {iters} iterations ({elapsed:.2f}s).')
+                                else:
+                                    self.load_puzzle(sol)
+                                    self.status_label.config(text=f'Best solution has {score} conflicts — after {iters} iterations.')
+                                
+                                # Clean up
+                                if hasattr(self, '_initial_conflicts'):
+                                    delattr(self, '_initial_conflicts')
+                            except Exception as e:
+                                self.status_label.config(text=f'Error finalizing: {str(e)}')
+                                print(f"Error in finalize: {e}")
+                        
+                        self.root.after(0, finalize)
+                    except Exception as e:
+                        self.root.after(0, lambda: self.status_label.config(text=f'Error in Cultural Algorithm: {str(e)}'))
+                        print(f"Error in cultural thread: {e}")
+                
+                # Start thread
+                threading.Thread(target=solve_cultural_thread, daemon=True).start()
         except Exception as e:
             self.status_label.config(text=f'Error: {str(e)}')
             print(f"Error in solve: {e}")

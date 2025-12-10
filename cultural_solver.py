@@ -48,12 +48,13 @@ class CulturalSudokuSolver:
     # --------------------------------------------------------------
     #  INITIALISATION
     # --------------------------------------------------------------
-    def __init__(self, clues: Grid, population_size: int = 200, max_iters: int = 3000):
+    def __init__(self, clues: Grid, population_size: int = 200, max_iters: int = 3000, callback=None):
         """
         Args:
             clues: 2‑D list with 0 for empty cells.
             population_size: how many candidate boards we keep each generation.
             max_iters: hard limit on generations.
+            callback: optional callback for real-time metrics updates.
         """
         self.clues: Grid = deepcopy(clues)
         self.size: int = len(clues)
@@ -61,6 +62,13 @@ class CulturalSudokuSolver:
         # The GUI may pass larger values, but we clamp them here.
         self.population_size: int = max(10, population_size)
         self.max_iters: int = max_iters
+        self.callback = callback
+        
+        # Metrics tracking
+        self.mutation_count = 0
+        self.belief_update_count = 0
+        self.initial_conflicts = None
+        self.current_conflicts = None
 
         # Block shape depends on grid size.
         # 4x4 -> 2x2, 9x9 -> 3x3, 6x6 -> 2x3 (standard rectangular blocks).
@@ -71,7 +79,7 @@ class CulturalSudokuSolver:
         elif self.size == 6:
             self.block_rows, self.block_cols = 2, 3
             self.population_size = min(self.population_size, 60)
-            self.max_iters = min(self.max_iters, 500)
+            self.max_iters = min(self.max_iters, 1400)
         else:
             root = int(math.sqrt(self.size))
             if root * root != self.size:
@@ -79,7 +87,7 @@ class CulturalSudokuSolver:
             self.block_rows = self.block_cols = root
             # 9x9 is the heaviest case; keep limits conservative.
             self.population_size = min(self.population_size, 80)
-            self.max_iters = min(self.max_iters, 800)
+            self.max_iters = min(self.max_iters, 2000)
 
         # All mutable (non‑clue) positions.
         self.mutable_positions: List[Position] = [
@@ -182,6 +190,9 @@ class CulturalSudokuSolver:
                 val = grid[r][c]
                 cell_hist = self.belief.setdefault((r, c), {})
                 cell_hist[val] = cell_hist.get(val, 0.0) + weight
+        
+        # Track belief updates
+        self.belief_update_count += 1
 
     def _sample_from_belief(self, pos: Position) -> int:
         """Sample a value for this cell from the belief histogram.
@@ -267,6 +278,9 @@ class CulturalSudokuSolver:
         for r in range(self.size):
             self._repair_row(new_grid, r)
 
+        # Track mutations
+        self.mutation_count += 1
+
         return new_grid
 
     # --------------------------------------------------------------
@@ -290,6 +304,14 @@ class CulturalSudokuSolver:
 
         best_grid, best_score = min(population, key=lambda x: x[1])
         best_grid = deepcopy(best_grid)
+        
+        # Track initial conflicts
+        self.initial_conflicts = best_score
+        self.current_conflicts = best_score
+        
+        # Initial callback
+        if self.callback:
+            self.callback(0, best_score, self.mutation_count, self.belief_update_count)
 
         # ---- 2. Evolution loop ----
         for it in range(1, self.max_iters + 1):
@@ -319,6 +341,12 @@ class CulturalSudokuSolver:
             if current_best_score < best_score:
                 best_score = current_best_score
                 best_grid = deepcopy(current_best_grid)
+            
+            self.current_conflicts = best_score
+            
+            # Real-time callback for metrics
+            if self.callback:
+                self.callback(it, best_score, self.mutation_count, self.belief_update_count)
 
         # ----------------------------------------------------------
         #  Optional: quick backtracking repair for guaranteed solution
