@@ -128,15 +128,18 @@ def generate_random_puzzle(difficulty="medium", size=9):
     Generate a random Sudoku puzzle.
 
     Args:
-        difficulty: "easy", "medium", or "hard"
+        difficulty: "easy" or "medium"
         size: size of the grid (4, 6, or 9)
     """
     # Define difficulty levels (percentage of cells to remove)
     difficulty_levels = {
         "easy": 0.4,    # ~40% cells removed
         "medium": 0.6,  # ~60% cells removed
-        "hard": 0.7,    # ~70% cells removed
     }
+
+    # Backward compatibility: if older code passes "hard", treat it as "medium"
+    if difficulty == "hard":
+        difficulty = "medium"
     
     # Generate a complete grid
     full_grid = generate_full_grid(size)

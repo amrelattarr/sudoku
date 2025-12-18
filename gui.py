@@ -9,6 +9,10 @@ from generator import generate_random_puzzle
 import time
 import datetime
 import threading
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib
+matplotlib.use('TkAgg')
 
 
 class SudokuGUI:
@@ -35,7 +39,18 @@ class SudokuGUI:
         self.puzzle = []
         self.grid_frame = None
         self.is_solving = False  # Flag to track if animation is running
+        self.is_algorithm_running = False  # Flag to track if a solver thread is running
         self.animation_speed = 50  # Delay in milliseconds between steps
+        self.stop_algorithm_event = None  # threading.Event for cooperative cancel
+        
+        # Evolution history for cultural algorithm plotting
+        self.evolution_history = {
+            'generations': [],
+            'conflicts': [],
+            'mutations': [],
+            'belief_updates': []
+        }
+        self.has_cultural_results = False
         
         # Performance metrics
         self.metrics = {
@@ -380,8 +395,10 @@ class SudokuGUI:
         diff_frame.pack(fill='x', pady=5)
         
         self.difficulty_var = tk.StringVar(value='medium')
-        for diff in ['easy', 'medium', 'hard']:
-            rb = tk.Radiobutton(diff_frame, text=diff.capitalize(), variable=self.difficulty_var, 
+        # NOTE: Keep the internal value "medium" (behavior/parameters) but display it as "Hard".
+        diff_display = {"easy": "Easy", "medium": "Hard"}
+        for diff in ['easy', 'medium']:
+            rb = tk.Radiobutton(diff_frame, text=diff_display.get(diff, diff.capitalize()), variable=self.difficulty_var, 
                               value=diff, bg='#f0f0f0', font=('Arial', 10),
                               selectcolor='#e1e1e1', indicatoron=1, width=8)
             rb.pack(anchor='w', pady=2)
@@ -395,7 +412,8 @@ class SudokuGUI:
         for algo in [('Backtracking', 'backtracking'), ('Cultural', 'cultural')]:
             rb = tk.Radiobutton(algo_frame, text=algo[0], variable=self.algo_var, 
                               value=algo[1], bg='#f0f0f0', font=('Arial', 10),
-                              selectcolor='#e1e1e1', indicatoron=1, width=12)
+                              selectcolor='#e1e1e1', indicatoron=1, width=12,
+                              command=self.on_algorithm_change)
             rb.pack(anchor='w', pady=2)
         
         # Animation speed control
@@ -458,12 +476,46 @@ class SudokuGUI:
         self.solve_btn.bind('<Enter>', lambda e: self.solve_btn.config(bg='#40b868'))
         self.solve_btn.bind('<Leave>', lambda e: self.solve_btn.config(bg='#50c878'))
         
-        # Stop button
+        # Stop Algorithm button (stops the running solver thread)
+        self.stop_algorithm_btn = tk.Button(
+            btn_frame,
+            text='⏹ Stop Algorithm',
+            command=self.stop_algorithm,
+            bg='#d35400',
+            fg='white',
+            state='disabled',
+            **btn_style
+        )
+        self.stop_algorithm_btn.pack(pady=5, fill='x')
+        self.stop_algorithm_btn.bind(
+            '<Enter>',
+            lambda e: self.stop_algorithm_btn.config(bg='#ba4a00') if self.is_algorithm_running else None
+        )
+        self.stop_algorithm_btn.bind(
+            '<Leave>',
+            lambda e: self.stop_algorithm_btn.config(bg='#d35400') if self.is_algorithm_running else None
+        )
+
+        # Show Evolution button (for cultural algorithm)
+        self.evolution_btn = tk.Button(
+            btn_frame,
+            text='📊 Evolution',
+            command=self.show_evolution_plots,
+            bg='#9b59b6',
+            fg='white',
+            state='disabled',
+            **btn_style
+        )
+        self.evolution_btn.pack(pady=5, fill='x')
+        self.evolution_btn.bind('<Enter>', lambda e: self.evolution_btn.config(bg='#8e44ad') if self.has_cultural_results else None)
+        self.evolution_btn.bind('<Leave>', lambda e: self.evolution_btn.config(bg='#9b59b6') if self.has_cultural_results else None)
+
+        # Stop Animation button (stops backtracking visualization)
         self.stop_btn = tk.Button(
-            btn_frame, 
-            text='■ Stop', 
+            btn_frame,
+            text='■ Stop Animation',
             command=self.stop_animation,
-            bg='#e74c3c', 
+            bg='#e74c3c',
             fg='white',
             state='disabled',
             **btn_style
@@ -496,6 +548,16 @@ class SudokuGUI:
         else:
             label = 'Very Slow'
         self.speed_label.config(text=label)
+    
+    def on_algorithm_change(self):
+        """Handle algorithm selection change to update button states."""
+        algo = self.algo_var.get()
+        # Disable evolution button if backtracking is selected
+        if algo == 'backtracking':
+            self.evolution_btn.config(state='disabled')
+        # Keep it disabled until cultural algorithm is solved
+        elif algo == 'cultural' and not self.has_cultural_results:
+            self.evolution_btn.config(state='disabled')
     
     # ----------------------------------------------------------
     #  BASIC GRID OPS
@@ -538,13 +600,19 @@ class SudokuGUI:
     def load_random(self):
         diff = self.difficulty_var.get()
         size = self.size_var.get()
-        self.status_label.config(text=f'Generating {size}x{size} {diff} puzzle...')
+        # Display name only: treat internal "medium" as "hard" in UI text.
+        diff_label = 'hard' if diff == 'medium' else diff
+        self.status_label.config(text=f'Generating {size}x{size} {diff_label} puzzle...')
         self.root.update()
+        
+        # Reset cultural results flag and disable evolution button for new puzzle
+        self.has_cultural_results = False
+        self.evolution_btn.config(state='disabled')
 
         try:
             puzzle = generate_random_puzzle(diff, size)
             self.load_puzzle(puzzle)
-            self.status_label.config(text=f'Loaded {size}x{size} {diff} puzzle.')
+            self.status_label.config(text=f'Loaded {size}x{size} {diff_label} puzzle.')
         except Exception as e:
             self.status_label.config(text=f'Error generating puzzle: {str(e)}')
             print(f"Error generating puzzle: {e}")
@@ -626,6 +694,17 @@ class SudokuGUI:
         self.restart_btn.config(state='normal')
         self.stop_btn.config(state='disabled')
         self.status_label.config(text='Animation stopped.')
+
+    def stop_algorithm(self):
+        """Stop a running solver (backtracking or cultural) cooperatively."""
+        if self.stop_algorithm_event is not None:
+            self.stop_algorithm_event.set()
+        self.is_algorithm_running = False
+        # Re-enable UI immediately; finalize callbacks also guard against stopped state.
+        self.solve_btn.config(state='normal')
+        self.restart_btn.config(state='normal')
+        self.stop_algorithm_btn.config(state='disabled')
+        self.status_label.config(text='Stopping algorithm... (may take a moment)')
     
     def finalize_solution(self, solved_grid):
         """Show the final solved puzzle with appropriate colors."""
@@ -703,10 +782,17 @@ class SudokuGUI:
     # ----------------------------------------------------------
     def solve(self):
         try:
+            # Reset/prepare cooperative cancellation for this run.
+            self.stop_algorithm_event = threading.Event()
+            self.is_algorithm_running = True
+            self.stop_algorithm_btn.config(state='normal')
+
             # Check if puzzle is already solved (no zeros left)
             current_grid = self.get_grid_from_entries()
             if all(cell != 0 for row in current_grid for cell in row):
                 self.status_label.config(text='Puzzle is already solved!')
+                self.is_algorithm_running = False
+                self.stop_algorithm_btn.config(state='disabled')
                 return
                 
             algo = self.algo_var.get()
@@ -730,24 +816,41 @@ class SudokuGUI:
                 # Create new metrics card for this solve
                 self.add_metrics_card('backtracking')
                 self.start_time = start
+                # Disable conflicting actions while the solver thread runs
+                self.solve_btn.config(state='disabled')
+                self.restart_btn.config(state='disabled')
                 
                 # Run solver in separate thread
                 def solve_backtracking_thread():
                     try:
                         # Create solver with callback
                         def backtrack_callback(event_type, steps, backtracks):
+                            # Avoid flooding UI if user requested stop.
+                            if self.stop_algorithm_event is not None and self.stop_algorithm_event.is_set():
+                                return
                             elapsed = time.time() - self.start_time
                             self.update_current_metric('elapsed_time', 'Elapsed Time:', f'{elapsed:.2f}s')
                             self.update_current_metric('steps', 'Steps:', f'{steps:,}')
                             self.update_current_metric('backtracks', 'Backtracks:', f'{backtracks:,}')
                         
-                        s = Sudoku(grid, callback=backtrack_callback)
+                        s = Sudoku(grid, callback=backtrack_callback, stop_event=self.stop_algorithm_event)
                         # Enable step recording for visualization
                         ok, solved_grid, steps = s.solve(algorithm='backtracking', record_steps=True)
                         elapsed = time.time() - start
 
                         # Schedule GUI updates on main thread
                         def finalize():
+                            # Solver thread finished (or was stopped)
+                            self.is_algorithm_running = False
+                            self.stop_algorithm_btn.config(state='disabled')
+
+                            # If user stopped, don't animate; just restore UI.
+                            if self.stop_algorithm_event is not None and self.stop_algorithm_event.is_set():
+                                self.solve_btn.config(state='normal')
+                                self.restart_btn.config(state='normal')
+                                self.status_label.config(text='Algorithm stopped.')
+                                return
+
                             if ok:
                                 # Final metric update
                                 self.update_current_metric('elapsed_time', 'Elapsed Time:', f'{elapsed:.2f}s')
@@ -759,11 +862,22 @@ class SudokuGUI:
                                 self.animate_steps(steps, solved_grid)
                             else:
                                 self.status_label.config(text='Backtracking could not solve this puzzle.')
+                                self.solve_btn.config(state='normal')
+                                self.restart_btn.config(state='normal')
                         
                         self.root.after(0, finalize)
                     except Exception as e:
                         self.root.after(0, lambda: self.status_label.config(text=f'Error: {str(e)}'))
                         print(f"Error in backtracking thread: {e}")
+                    finally:
+                        # Ensure UI isn't left locked if something goes wrong
+                        def unlock():
+                            if not self.is_solving:  # animation may still control buttons
+                                self.solve_btn.config(state='normal')
+                                self.restart_btn.config(state='normal')
+                            self.is_algorithm_running = False
+                            self.stop_algorithm_btn.config(state='disabled')
+                        self.root.after(0, unlock)
                 
                 # Start thread
                 threading.Thread(target=solve_backtracking_thread, daemon=True).start()
@@ -774,18 +888,56 @@ class SudokuGUI:
                 self.add_metrics_card('cultural')
                 self.start_time = start
                 
-                # Adjust population size based on grid size
-                population_size = min(300, self.grid_size * 30)  # Smaller grid needs smaller population
-                max_iters = 5000 if self.grid_size == 9 else 3000  # Fewer iterations for smaller grids
+                # Clear previous evolution history and reset flag
+                self.evolution_history = {
+                    'generations': [],
+                    'conflicts': [],
+                    'mutations': [],
+                    'belief_updates': []
+                }
+                self.has_cultural_results = False
+                self.evolution_btn.config(state='disabled')
+                # Disable conflicting actions while the solver thread runs
+                self.solve_btn.config(state='disabled')
+                self.restart_btn.config(state='disabled')
+                
+                # Adjust population size and iterations based on grid size and difficulty
+                # Medium puzzles need more resources than easy for cultural algorithm
+                difficulty = self.difficulty_var.get()
+                
+                if self.grid_size == 9:
+                    # 9x9 needs the most resources
+                    if difficulty == 'medium':
+                        population_size = 250
+                        max_iters = 10000
+                    else:  # easy
+                        population_size = 200
+                        max_iters = 5000
+                elif self.grid_size == 6:
+                    # 6x6 is moderate
+                    if difficulty == 'medium':
+                        population_size = 80
+                        max_iters = 4000
+                    else:  # easy
+                        population_size = 60
+                        max_iters = 2000
+                else:  # 4x4
+                    # 4x4 is small and fast
+                    population_size = 40
+                    max_iters = 700 if difficulty == 'medium' else 500
                 
                 # Run solver in separate thread
                 def solve_cultural_thread():
                     try:
-                        # Create solver with callback
-                        def cultural_callback(generation, conflicts, mutations, belief_updates):
+                        # Create solver with callback (updated signature with stagnation parameter)
+                        def cultural_callback(generation, conflicts, mutations, belief_updates, stagnation=0):
+                            # Avoid UI churn after stop requested
+                            if self.stop_algorithm_event is not None and self.stop_algorithm_event.is_set():
+                                return
                             elapsed = time.time() - self.start_time
                             self.update_current_metric('elapsed_time', 'Elapsed Time:', f'{elapsed:.2f}s')
                             self.update_current_metric('generations', 'Generations:', f'{generation:,}')
+                            self.update_current_metric('conflicts', 'Current Conflicts:', f'{conflicts}')
                             
                             # Calculate improvement rate
                             if hasattr(self, '_initial_conflicts') and self._initial_conflicts > 0:
@@ -797,18 +949,73 @@ class SudokuGUI:
                             
                             self.update_current_metric('mutations', 'Mutations:', f'{mutations:,}')
                             self.update_current_metric('belief_updates', 'Belief Updates:', f'{belief_updates:,}')
+                            
+                            # Add stagnation metric
+                            if stagnation > 0:
+                                self.update_current_metric('stagnation', 'Gens Stuck:', f'{stagnation}')
+                            
+                            # Update status label with progress and stagnation info
+                            if conflicts == 0:
+                                msg = f'✓ SOLVED! Generation {generation:,}'
+                                self.root.after(0, lambda m=msg: self.status_label.config(text=m))
+                            else:
+                                # Calculate improvement for status message
+                                if hasattr(self, '_initial_conflicts') and self._initial_conflicts > 0:
+                                    imp = ((self._initial_conflicts - conflicts) / self._initial_conflicts) * 100
+                                    
+                                    # Show different messages based on stagnation and conflicts
+                                    if conflicts <= 5 and stagnation >= 30:
+                                        msg = f'🔄 BELIEF RESET! Gen {generation:,} | {conflicts} conflicts'
+                                    elif conflicts <= 5 and stagnation >= 15:
+                                        msg = f'🔀 INVERTED BELIEF! Gen {generation:,} | {conflicts} conflicts left'
+                                    elif stagnation >= 100:
+                                        msg = f'🔄 DIVERSITY BOOST! Gen {generation:,} | {conflicts} conflicts'
+                                    elif stagnation >= 50:
+                                        msg = f'⚠ Stuck {stagnation} gens | Gen {generation:,} | {conflicts} conflicts'
+                                    else:
+                                        msg = f'Evolving... Gen {generation:,} | {conflicts} conflicts | {imp:.1f}% improved'
+                                else:
+                                    msg = f'Evolving... Gen {generation:,} | {conflicts} conflicts'
+                                self.root.after(0, lambda m=msg: self.status_label.config(text=m))
+                            
+                            # Store evolution history for plotting
+                            self.evolution_history['generations'].append(generation)
+                            self.evolution_history['conflicts'].append(conflicts)
+                            self.evolution_history['mutations'].append(mutations)
+                            self.evolution_history['belief_updates'].append(belief_updates)
                         
                         solver = CulturalSudokuSolver(grid, population_size=population_size, 
-                                                     max_iters=max_iters, callback=cultural_callback)
+                                                     max_iters=max_iters, callback=cultural_callback,
+                                                     stop_event=self.stop_algorithm_event)
                         sol, score, iters = solver.run()
                         elapsed = time.time() - start
 
                         # Schedule GUI updates on main thread
                         def finalize():
                             try:
+                                # Solver thread finished (or was stopped)
+                                self.is_algorithm_running = False
+                                self.stop_algorithm_btn.config(state='disabled')
+
+                                # If user stopped, show best-so-far and restore UI.
+                                if self.stop_algorithm_event is not None and self.stop_algorithm_event.is_set():
+                                    self.load_puzzle(sol)
+                                    for r, c in self.original_empties:
+                                        self.entries[r][c].config(fg='#e67e22')  # partial result in orange
+                                    self.status_label.config(text=f'Algorithm stopped at gen {iters:,} (best conflicts: {score}).')
+                                    self.solve_btn.config(state='normal')
+                                    self.restart_btn.config(state='normal')
+                                    # Do not enable evolution plots for an interrupted run
+                                    self.has_cultural_results = False
+                                    self.evolution_btn.config(state='disabled')
+                                    if hasattr(self, '_initial_conflicts'):
+                                        delattr(self, '_initial_conflicts')
+                                    return
+
                                 # Final metric update
                                 self.update_current_metric('elapsed_time', 'Elapsed Time:', f'{elapsed:.2f}s')
                                 self.update_current_metric('generations', 'Generations:', f'{iters:,}')
+                                self.update_current_metric('conflicts', 'Final Conflicts:', f'{score}')
                                 if hasattr(self, '_initial_conflicts') and self._initial_conflicts > 0:
                                     improvement = ((self._initial_conflicts - score) / self._initial_conflicts) * 100
                                     self.update_current_metric('improvement', 'Improvement:', f'{improvement:.1f}%')
@@ -816,15 +1023,23 @@ class SudokuGUI:
                                 self.update_current_metric('belief_updates', 'Belief Updates:', f'{solver.belief_update_count:,}')
 
                                 if score == 0:
-                                    # First load the solved puzzle with default colors
+                                    # PERFECT SOLUTION: Load and color solved cells in blue
                                     self.load_puzzle(sol)
-                                    # Then update colors for solved cells
                                     for r, c in self.original_empties:
-                                        self.entries[r][c].config(fg='blue')  # Solved cells in green
-                                    self.status_label.config(text=f'Cultural Algorithm solved in {iters} iterations ({elapsed:.2f}s).')
+                                        self.entries[r][c].config(fg='blue')  # Solved cells in blue
+                                    self.status_label.config(text=f'✓ Cultural Algorithm solved perfectly in {iters} iterations ({elapsed:.2f}s)!')
                                 else:
+                                    # INCOMPLETE SOLUTION: Show best attempt with red color to indicate conflicts
                                     self.load_puzzle(sol)
-                                    self.status_label.config(text=f'Best solution has {score} conflicts — after {iters} iterations.')
+                                    for r, c in self.original_empties:
+                                        self.entries[r][c].config(fg='#e74c3c')  # Unsolved cells in red to show conflicts
+                                    self.status_label.config(text=f'⚠ Best solution has {score} conflict(s) after {iters} iterations. Try: More iterations or easier puzzle.')
+                                
+                                # Enable the evolution button after successful cultural solve
+                                self.has_cultural_results = True
+                                self.evolution_btn.config(state='normal')
+                                self.solve_btn.config(state='normal')
+                                self.restart_btn.config(state='normal')
                                 
                                 # Clean up
                                 if hasattr(self, '_initial_conflicts'):
@@ -837,13 +1052,118 @@ class SudokuGUI:
                     except Exception as e:
                         self.root.after(0, lambda: self.status_label.config(text=f'Error in Cultural Algorithm: {str(e)}'))
                         print(f"Error in cultural thread: {e}")
+                    finally:
+                        def unlock():
+                            self.is_algorithm_running = False
+                            self.stop_algorithm_btn.config(state='disabled')
+                            # Only re-enable if not currently animating
+                            if not self.is_solving:
+                                self.solve_btn.config(state='normal')
+                                self.restart_btn.config(state='normal')
+                        self.root.after(0, unlock)
                 
                 # Start thread
                 threading.Thread(target=solve_cultural_thread, daemon=True).start()
         except Exception as e:
             self.status_label.config(text=f'Error: {str(e)}')
             print(f"Error in solve: {e}")
+            self.is_algorithm_running = False
+            self.stop_algorithm_btn.config(state='disabled')
 
+    def show_evolution_plots(self):
+        """Display evolution plots in a new window."""
+        if not self.has_cultural_results or not self.evolution_history['generations']:
+            messagebox.showwarning('No Data', 'No cultural algorithm evolution data available. Please solve using the Cultural algorithm first.')
+            return
+        
+        # Create new window for plots
+        plot_window = tk.Toplevel(self.root)
+        plot_window.title('Cultural Algorithm Evolution')
+        plot_window.geometry('1000x700')
+        plot_window.configure(bg='#f0f0f0')
+        
+        # Add title label
+        title_label = tk.Label(
+            plot_window,
+            text='Cultural Algorithm Evolution Analysis',
+            font=('Arial', 16, 'bold'),
+            bg='#f0f0f0',
+            fg='#2c3e50',
+            pady=10
+        )
+        title_label.pack()
+        
+        # Create figure with subplots
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(10, 7))
+        fig.patch.set_facecolor('#f0f0f0')
+        
+        generations = self.evolution_history['generations']
+        conflicts = self.evolution_history['conflicts']
+        mutations = self.evolution_history['mutations']
+        belief_updates = self.evolution_history['belief_updates']
+        
+        # Plot 1: Conflicts over Generations
+        ax1.plot(generations, conflicts, color='#e74c3c', linewidth=2, label='Conflicts')
+        ax1.set_xlabel('Generation', fontsize=10, fontweight='bold')
+        ax1.set_ylabel('Number of Conflicts', fontsize=10, fontweight='bold')
+        ax1.set_title('Conflicts Evolution', fontsize=12, fontweight='bold', pad=10)
+        ax1.grid(True, alpha=0.3, linestyle='--')
+        ax1.set_facecolor('#ffffff')
+        ax1.legend()
+        
+        # Plot 2: Mutations over Generations
+        ax2.plot(generations, mutations, color='#3498db', linewidth=2, label='Mutations')
+        ax2.set_xlabel('Generation', fontsize=10, fontweight='bold')
+        ax2.set_ylabel('Cumulative Mutations', fontsize=10, fontweight='bold')
+        ax2.set_title('Mutation Accumulation', fontsize=12, fontweight='bold', pad=10)
+        ax2.grid(True, alpha=0.3, linestyle='--')
+        ax2.set_facecolor('#ffffff')
+        ax2.legend()
+        
+        # Plot 3: Belief Updates over Generations
+        ax3.plot(generations, belief_updates, color='#2ecc71', linewidth=2, label='Belief Updates')
+        ax3.set_xlabel('Generation', fontsize=10, fontweight='bold')
+        ax3.set_ylabel('Cumulative Belief Updates', fontsize=10, fontweight='bold')
+        ax3.set_title('Belief Space Evolution', fontsize=12, fontweight='bold', pad=10)
+        ax3.grid(True, alpha=0.3, linestyle='--')
+        ax3.set_facecolor('#ffffff')
+        ax3.legend()
+        
+        # Plot 4: Convergence Rate (improvement percentage)
+        if conflicts:
+            initial_conflicts = conflicts[0]
+            improvement = [((initial_conflicts - c) / initial_conflicts * 100) if initial_conflicts > 0 else 0 
+                          for c in conflicts]
+            ax4.plot(generations, improvement, color='#9b59b6', linewidth=2, label='Improvement %')
+            ax4.set_xlabel('Generation', fontsize=10, fontweight='bold')
+            ax4.set_ylabel('Improvement (%)', fontsize=10, fontweight='bold')
+            ax4.set_title('Convergence Progress', fontsize=12, fontweight='bold', pad=10)
+            ax4.grid(True, alpha=0.3, linestyle='--')
+            ax4.set_facecolor('#ffffff')
+            ax4.axhline(y=100, color='#27ae60', linestyle='--', linewidth=1, alpha=0.5, label='Target (100%)')
+            ax4.legend()
+        
+        plt.tight_layout()
+        
+        # Embed the plot in the Tkinter window
+        canvas = FigureCanvasTkAgg(fig, master=plot_window)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Add close button
+        close_btn = tk.Button(
+            plot_window,
+            text='Close',
+            command=plot_window.destroy,
+            bg='#e74c3c',
+            fg='white',
+            font=('Arial', 10, 'bold'),
+            padx=20,
+            pady=5,
+            cursor='hand2'
+        )
+        close_btn.pack(pady=10)
+    
     def set_style(self):
         """Configure ttk styles for the application."""
         style = ttk.Style()

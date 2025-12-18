@@ -3,7 +3,7 @@
 from copy import deepcopy
 
 class Sudoku:
-    def __init__(self, grid, callback=None):
+    def __init__(self, grid, callback=None, stop_event=None):
         self.grid = deepcopy(grid)  # NxN grid, 0 for empty
         self.size = len(grid)
         
@@ -24,6 +24,7 @@ class Sudoku:
             
         self.steps = []  # (r,c,val, action) action: 'place' or 'remove'
         self.callback = callback  # For real-time metrics updates
+        self.stop_event = stop_event  # Optional: cooperative cancellation
         self.backtrack_count = 0  # Track number of backtracks
         self.step_count = 0  # Track number of steps
 
@@ -52,11 +53,18 @@ class Sudoku:
         return True
 
     def solve_backtracking(self, record_steps=True):
+        # Cooperative cancellation: allow GUI to stop a running solve thread.
+        if self.stop_event is not None and self.stop_event.is_set():
+            return False
+
         found = self.find_empty()
         if not found:
             return True
         r, c = found
         for val in range(1, self.size + 1):
+            if self.stop_event is not None and self.stop_event.is_set():
+                return False
+
             if self.valid(r, c, val):
                 self.grid[r][c] = val
                 self.step_count += 1
@@ -67,6 +75,10 @@ class Sudoku:
                     self.callback('step', self.step_count, self.backtrack_count)
                 if self.solve_backtracking(record_steps):
                     return True
+                # If we were cancelled while recursing, exit quickly instead
+                # of continuing to try other values.
+                if self.stop_event is not None and self.stop_event.is_set():
+                    return False
                 # backtrack
                 self.grid[r][c] = 0
                 self.backtrack_count += 1
