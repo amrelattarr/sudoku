@@ -984,9 +984,16 @@ class SudokuGUI:
                             self.evolution_history['mutations'].append(mutations)
                             self.evolution_history['belief_updates'].append(belief_updates)
                         
-                        solver = CulturalSudokuSolver(grid, population_size=population_size, 
-                                                     max_iters=max_iters, callback=cultural_callback,
-                                                     stop_event=self.stop_algorithm_event)
+                        # Throttle GUI updates so the solver can run faster.
+                        # (Too-frequent callbacks can become the bottleneck.)
+                        solver = CulturalSudokuSolver(
+                            grid,
+                            population_size=population_size,
+                            max_iters=max_iters,
+                            callback=cultural_callback,
+                            stop_event=self.stop_algorithm_event,
+                            callback_every=5,
+                        )
                         sol, score, iters = solver.run()
                         elapsed = time.time() - start
 

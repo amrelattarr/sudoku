@@ -97,6 +97,7 @@ class CulturalSudokuSolver:
         max_iters: int = 3000,
         callback=None,
         stop_event=None,
+        callback_every: int = 1,
     ):
         """
         Args:
@@ -113,6 +114,7 @@ class CulturalSudokuSolver:
         self.max_iters: int = max_iters
         self.callback = callback
         self.stop_event = stop_event  # Optional cooperative cancellation (threading.Event-like)
+        self.callback_every = max(1, int(callback_every))
         
         # Metrics tracking
         self.mutation_count = 0
@@ -155,6 +157,14 @@ class CulturalSudokuSolver:
         # Belief space: for each mutable cell, a histogram of promising values.
         # Example: belief[(r, c)] = {5: 10.0, 7: 3.0, ...}
         self.belief: Dict[Position, Dict[int, float]] = {}
+
+        # Precompute mutable columns per row (saves tons of repeated list building)
+        self._mutable_cols_by_row: List[List[int]] = [
+            [c for c in range(self.size) if self.clues[r][c] == 0] for r in range(self.size)
+        ]
+
+        # Reusable buffer for fast conflict counting (stamp-based duplicate detection)
+        self._seen_stamp: List[int] = [0] * (self.size + 1)
         
         # Track stagnation for adaptive diversity control
         self.generations_without_improvement = 0
@@ -172,6 +182,10 @@ class CulturalSudokuSolver:
     # --------------------------------------------------------------
     #  BASIC HELPERS
     # --------------------------------------------------------------
+    def _copy_grid(self, grid: Grid) -> Grid:
+        """Fast 2D list copy (much cheaper than deepcopy for int grids)."""
+        return [row[:] for row in grid]
+
     def _row_missing_numbers(self, row_index: int) -> List[int]:
         """Return which numbers (1..N) are missing from a given row (ignoring zeros)."""
         present = {v for v in self.clues[row_index] if v != 0}
@@ -211,7 +225,8 @@ class CulturalSudokuSolver:
         Returns:
             A complete NxN grid with valid rows
         """
-        grid = deepcopy(self.clues)
+        # Cheaper than deepcopy for a 2D list of ints
+        grid = [row[:] for row in self.clues]
         for r in range(self.size):
             missing = self._row_missing_numbers(r) 
             random.shuffle(missing)
@@ -234,22 +249,37 @@ class CulturalSudokuSolver:
         We do NOT count row conflicts here because our construction & repair
         keep rows as permutations of 1..N.
         """
+        # Fast stamp-based duplicate counting:
+        # Each extra occurrence of a number contributes 1 conflict.
         conflicts = 0
         n = self.size
+        seen = self._seen_stamp
+        stamp = 1
 
-        # Column conflicts: repeated numbers in each column.
+        # Column conflicts
         for c in range(n):
-            col = [grid[r][c] for r in range(n)]
-            conflicts += n - len(set(col))
+            for r in range(n):
+                v = grid[r][c]
+                if seen[v] == stamp:
+                    conflicts += 1
+                else:
+                    seen[v] = stamp
+            stamp += 1
 
-        # Block conflicts: repeated numbers in each block.
-        for br in range(0, n, self.block_rows):
-            for bc in range(0, n, self.block_cols):
-                block_vals: List[int] = []
-                for r in range(br, br + self.block_rows):
-                    for c in range(bc, bc + self.block_cols):
-                        block_vals.append(grid[r][c])
-                conflicts += len(block_vals) - len(set(block_vals))
+        # Block conflicts
+        br_step = self.block_rows
+        bc_step = self.block_cols
+        for br in range(0, n, br_step):
+            for bc in range(0, n, bc_step):
+                for r in range(br, br + br_step):
+                    row = grid[r]
+                    for c in range(bc, bc + bc_step):
+                        v = row[c]
+                        if seen[v] == stamp:
+                            conflicts += 1
+                        else:
+                            seen[v] = stamp
+                stamp += 1
 
         return conflicts
 
@@ -405,7 +435,7 @@ class CulturalSudokuSolver:
         Returns:
             Mutated grid (might be worse than input!)
         """
-        current_grid = deepcopy(grid)
+        current_grid = self._copy_grid(grid)
         current_score = self._count_conflicts(current_grid)
         
         # Try a few random swaps, accepting based on temperature
@@ -425,21 +455,22 @@ class CulturalSudokuSolver:
             r1, c1 = pos1
             r2, c2 = pos2
             
-            test_grid = deepcopy(current_grid)
-            test_grid[r1][c1], test_grid[r2][c2] = test_grid[r2][c2], test_grid[r1][c1]
-            test_score = self._count_conflicts(test_grid)
+            # Try swap in-place, then revert if rejected (avoids deepcopy)
+            current_grid[r1][c1], current_grid[r2][c2] = current_grid[r2][c2], current_grid[r1][c1]
+            test_score = self._count_conflicts(current_grid)
             
             # ACCEPT if better OR with probability based on temperature
             delta = test_score - current_score
             if delta <= 0:  # Better or equal
-                current_grid = test_grid
                 current_score = test_score
                 if test_score == 0:
                     break
             elif random.random() < math.exp(-delta / temperature):
                 # ACCEPT WORSE solution! (with probability)
-                current_grid = test_grid
                 current_score = test_score
+            else:
+                # Reject: revert swap
+                current_grid[r1][c1], current_grid[r2][c2] = current_grid[r2][c2], current_grid[r1][c1]
         
         return current_grid
     
@@ -465,16 +496,17 @@ class CulturalSudokuSolver:
         Returns:
             A new grid that combines rows from both parents
         """
-        child = deepcopy(self.clues)  # Start with clues only
+        # Parents already respect clues; row-slice copy is enough and much faster than deepcopy.
+        child: Grid = [[0] * self.size for _ in range(self.size)]
         
         # For each row, randomly choose which parent to inherit from
         for r in range(self.size):
             if random.random() < 0.5:
                 # Take this row from parent1
-                child[r] = deepcopy(parent1[r])
+                child[r] = parent1[r][:]
             else:
                 # Take this row from parent2
-                child[r] = deepcopy(parent2[r])
+                child[r] = parent2[r][:]
         
         return child
 
@@ -570,7 +602,7 @@ class CulturalSudokuSolver:
         with values that keep us stuck. Setting invert_belief=True flips
         the weights - we try values we normally avoid. This helps escape!
         """
-        new_grid = deepcopy(grid)
+        new_grid = self._copy_grid(grid)
 
         # Go through each empty cell (non-clue) and potentially modify it
         for (r, c) in self.mutable_positions:
@@ -628,7 +660,7 @@ class CulturalSudokuSolver:
 
     def _row_mutable_cols(self, r: int) -> List[int]:
         """Return mutable column indices for a row (non-clues only)."""
-        return [c for c in range(self.size) if self.clues[r][c] == 0]
+        return self._mutable_cols_by_row[r]
 
     def _conflict_directed_row_swap_search(
         self,
@@ -650,7 +682,7 @@ class CulturalSudokuSolver:
           small SA-style probability (helps escape small loops).
         """
         current_score = self._count_conflicts(grid)
-        best_grid = deepcopy(grid)
+        best_grid = self._copy_grid(grid)
         best_score = current_score
 
         if best_score == 0:
@@ -664,22 +696,15 @@ class CulturalSudokuSolver:
             if self.stop_event is not None and getattr(self.stop_event, "is_set", lambda: False)():
                 break
 
-            # Build list of candidate rows that contain conflicts in mutable positions
-            conflict_rows: List[int] = []
-            conflict_cols_by_row: Dict[int, List[int]] = {}
-            for r in range(n):
-                cols = self._row_mutable_cols(r)
-                if len(cols) < 2:
-                    continue
-                conflict_cols = [c for c in cols if self._cell_is_in_conflict(grid, r, c)]
-                if conflict_cols:
-                    conflict_rows.append(r)
-                    conflict_cols_by_row[r] = conflict_cols
+            # Much cheaper than scanning the whole grid each attempt:
+            # pick a row, then detect conflicts only within that row's mutable positions.
+            r = random.randrange(n)
+            mutable_cols = self._row_mutable_cols(r)
+            if len(mutable_cols) < 2:
+                continue
 
-            if conflict_rows:
-                r = random.choice(conflict_rows)
-                mutable_cols = self._row_mutable_cols(r)
-                conflict_cols = conflict_cols_by_row.get(r, [])
+            conflict_cols = [c for c in mutable_cols if self._cell_is_in_conflict(grid, r, c)]
+            if conflict_cols:
                 # When very close, do a stronger "best-swap-in-row" search to avoid thrashing.
                 use_greedy = (current_score <= 6) or (random.random() < 0.25)
                 if use_greedy:
@@ -716,11 +741,7 @@ class CulturalSudokuSolver:
                         continue
                     c2 = random.choice(c2_candidates)
             else:
-                # No explicit conflicts found (rare when score>0) → random row swap
-                r = random.randrange(n)
-                mutable_cols = self._row_mutable_cols(r)
-                if len(mutable_cols) < 2:
-                    continue
+                # No explicit conflicts in this row → random swap in row
                 c1, c2 = random.sample(mutable_cols, 2)
 
             # Propose swap (in-place)
@@ -740,7 +761,7 @@ class CulturalSudokuSolver:
                 current_score = new_score
                 if new_score < best_score:
                     best_score = new_score
-                    best_grid = deepcopy(grid)
+                    best_grid = self._copy_grid(grid)
                     if best_score == 0:
                         return best_grid, 0
             else:
@@ -766,7 +787,7 @@ class CulturalSudokuSolver:
         - stagnation counters
         - mutation/belief update counters (metrics restart)
         """
-        print("Hard restart")
+        # NOTE: Avoid printing here; frequent restarts can slow the solver.
         self.belief.clear()
         self.generations_without_improvement = 0
         self.last_best_score = float("inf")
@@ -782,7 +803,7 @@ class CulturalSudokuSolver:
 
         self._update_belief(population, decay_factor=0.8)
         best_grid, best_score = min(population, key=lambda x: x[1])
-        best_grid = deepcopy(best_grid)
+        best_grid = self._copy_grid(best_grid)
 
         self.initial_conflicts = best_score
         self.current_conflicts = best_score
@@ -846,7 +867,7 @@ class CulturalSudokuSolver:
             # └─────────────────────────────────────────────────────────┘
             # Start with elitism: always keep the best solution
             # This guarantees we NEVER lose progress (monotonic improvement)
-            new_population: List[Tuple[Grid, int]] = [(deepcopy(best_grid), best_score)]
+            new_population: List[Tuple[Grid, int]] = [(self._copy_grid(best_grid), best_score)]
 
             # ┌─────────────────────────────────────────────────────────┐
             # │ STEP 2b: SELECTION MECHANISM
@@ -965,7 +986,7 @@ class CulturalSudokuSolver:
             current_best_grid, current_best_score = min(population, key=lambda x: x[1])
             if current_best_score < best_score:
                 best_score = current_best_score
-                best_grid = deepcopy(current_best_grid)
+                best_grid = self._copy_grid(current_best_grid)
                 self.generations_without_improvement = 0  # Reset stagnation counter
                 self.plateau_generations = 0  # Reset true plateau only on improvement
             else:
@@ -997,7 +1018,7 @@ class CulturalSudokuSolver:
                     self.restart_count += 1
                     population, best_grid, best_score = self._hard_restart()
                     # Continue with fresh society; generation counter `it` keeps going.
-                    if self.callback:
+                    if self.callback and (it % self.callback_every == 0):
                         self.callback(it, best_score, self.mutation_count, self.belief_update_count, 0)
                     continue
 
@@ -1105,7 +1126,7 @@ class CulturalSudokuSolver:
             
             # Report progress to GUI (if callback provided)
             # Pass stagnation info so GUI can show when we're stuck
-            if self.callback:
+            if self.callback and (it % self.callback_every == 0 or best_score == 0):
                 # Show true plateau length (does not reset on diversity injection / annealing)
                 self.callback(it, best_score, self.mutation_count, self.belief_update_count, self.plateau_generations)
 

@@ -133,8 +133,8 @@ def generate_random_puzzle(difficulty="medium", size=9):
     """
     # Define difficulty levels (percentage of cells to remove)
     difficulty_levels = {
-        "easy": 0.4,    # ~40% cells removed
-        "medium": 0.6,  # ~60% cells removed
+        "easy": 0.4,    # ~30% cells removed
+        "medium": 0.6,  # ~50% cells removed
     }
 
     # Backward compatibility: if older code passes "hard", treat it as "medium"
